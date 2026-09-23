@@ -1,0 +1,33 @@
+# --- Go 编译产物 ---
+/warmup/warmup
+/warmup/warmup.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# --- 测试 / 覆盖率 ---
+*.test
+*.out
+coverage.*
+
+# --- Go 工具链 ---
+go.work
+go.work.sum
+vendor/
+
+# --- kubebuilder / controller-gen 下载的工具（Day 3 起会用） ---
+/bin/
+/testbin/
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
