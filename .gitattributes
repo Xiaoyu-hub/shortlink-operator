@@ -1,0 +1,20 @@
+# 全仓库统一 LF —— Windows 上 core.autocrlf=true 会把文本文件 checkout 成 CRLF，
+# 那会让 `gofmt -l` 一直报脏，更糟的是 CRLF 的 Makefile / YAML 在容器里会直接崩。
+* text=auto eol=lf
+
+*.go    text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+
+# 二进制，别碰
+*.png binary
+*.jpg binary
+*.gif binary
+*.mp4 binary
+*.ico binary
