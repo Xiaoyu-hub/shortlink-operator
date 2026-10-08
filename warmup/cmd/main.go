@@ -17,8 +17,8 @@
 // 然后另开一个终端（PowerShell 里用 curl.exe，别用 curl 别名）：
 //
 //	curl.exe "http://localhost:8080/"
-//	curl.exe "http://localhost:8080/count"
-//	curl.exe "http://localhost:8080/inc?workers=50&perWorker=1000"
+//	curl.exe "http://localhost:8080/count?kind=mutex"
+//	curl.exe "http://localhost:8080/inc?kind=atomic&workers=200&perWorker=5000"
 //	curl.exe "http://localhost:8080/sum?n=10"
 //
 // 想把并发 bug 也抓出来，加 -race：
@@ -39,24 +39,33 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yourname/shortlink-operator/warmup"
+	"github.com/Xiaoyu-hub/shortlink-operator/warmup"
 )
 
-// counter 是全局共享状态。它会被多个 HTTP handler goroutine 同时访问 ——
-// 这正是 warmup.Counter 必须并发安全的原因。
-var counter warmup.Counter
+// counters 是全局共享状态。它会被多个 HTTP handler goroutine 同时访问 ——
+// 这正是 warmup.Counter 系列必须并发安全的原因。
+//
+// 三种实现同时挂在一个 map 里，用 interface 抹平差异：
+// 这就是 Go 的"多态"，也是我们后面 reconciler 里"不同资源用同一套调和逻辑"的雏形。
+var counters = map[string]counter{
+	"mutex":   new(warmup.Counter),
+	"atomic":  new(warmup.AtomicCounter),
+	"sharded": warmup.NewShardedCounter(8),
+}
+
+// counter 是本地定义的最小接口（与 warmup 包里测试用的那个等价）。
+//
+// 注意：接口可以定义在使用方而不是实现方 —— Go 的惯用法是"接口越小越好，
+// 由消费者定义"。controller-runtime 的 Reconciler 也是这种小接口。
+type counter interface {
+	Inc()
+	Value() int64
+}
 
 func main() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", handleIndex)
-	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/count", handleCount)
-	mux.HandleFunc("/inc", handleInc)
-	mux.HandleFunc("/sum", handleSum)
-
 	srv := &http.Server{
 		Addr:    ":8080",
-		Handler: logRequests(mux), // 用中间件包一层，顺手演示 interface
+		Handler: newMux(), // 入口只做组装，路由逻辑单独一个函数，方便 httptest 覆盖
 	}
 
 	// channel 用法之一：接操作系统信号。
@@ -65,6 +74,7 @@ func main() {
 
 	// 主 goroutine 去跑 server；<-stop 这行后面阻塞等待信号。
 	// 这就是 Go 最典型的服务骨架：一个 goroutine 干活，主 goroutine 等退出信号。
+	// controller-runtime 的 manager.Start 内部也是这个模式（阻塞在 ctx.Done 上）。
 	go func() {
 		log.Println("listening on http://localhost:8080  (Ctrl+C 退出)")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -75,11 +85,28 @@ func main() {
 	<-stop
 	log.Println("shutting down...")
 
+	// 优雅退出：给在途请求 5 秒收尾时间。Operator 里对应的是
+	// "收到 SIGTERM 后停止接收新 reconcile、等当前调和跑完"。
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
+}
+
+// newMux 组装路由。
+//
+// 抽成函数的意义在 Day 14 就会体现：envtest 里我们不启真集群、也不起真端口，
+// 而是直接把被测组件组装起来打请求。可测试性从第一天就该长在代码结构里。
+func newMux() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleIndex)
+	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/count", handleCount)
+	mux.HandleFunc("/inc", handleInc)
+	mux.HandleFunc("/sum", handleSum)
+
+	return logRequests(mux) // 用中间件包一层，顺手演示 interface
 }
 
 // logRequests 是一个中间件：吃一个 http.Handler，吐一个 http.Handler。
@@ -103,10 +130,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, `shortlink-operator · Day 1 warmup
 
-GET /healthz                        存活探针
-GET /count                          读当前计数
-GET /inc?workers=50&perWorker=1000  起 N 个 goroutine 并发打计数器，比对期望/实际
-GET /sum?n=10                       纯 channel 演练：n 个 goroutine 算 i*i，主 goroutine 汇总
+GET /healthz                                    存活探针
+GET /count?kind=mutex|atomic|sharded            读当前计数
+GET /inc?kind=atomic&workers=50&perWorker=1000  起 N 个 goroutine 并发打计数器，比对期望/实际
+GET /sum?n=10                                   纯 channel 演练：n 个 goroutine 算 i*i，主 goroutine 汇总
 `)
 }
 
@@ -115,19 +142,37 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "ok")
 }
 
+// handleCount 读计数。kind 参数决定读哪一种实现。
 func handleCount(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "count = %d\n", counter.Value())
+	kind := kindParam(r)
+	c, ok := counters[kind]
+	if !ok {
+		http.Error(w, "unknown kind，可选：mutex / atomic / sharded", http.StatusBadRequest)
+		return
+	}
+	fmt.Fprintf(w, "kind = %s\ncount = %d\n", kind, c.Value())
 }
 
 // handleInc 是 goroutine + 共享状态演练。
 //
 // 它起 workers 个 goroutine，每个跑 perWorker 次 counter.Inc()，
-// 用 sync.WaitGroup 等它们全部结束，然后把「期望值 vs 实际值」摆出来。
+// 用 sync.WaitGroup 等它们全部结束，然后把「期望增量 vs 实际增量」摆出来。
 //
-// Counter 还没改成并发安全之前，这里的 actual 会小于 expected —— 你亲眼看到丢更新。
+// 关键设计：比对的是**增量**（inc 前后各读一次 Value 做差），而不是绝对值。
+// 这样多个 /inc 请求并发打进来、或者反复 curl 时，结果依然可判定 ——
+// 这也顺手演示了"幂等/可重复验证"的思路，Day 14 写 envtest 时会一直用到。
 func handleInc(w http.ResponseWriter, r *http.Request) {
+	kind := kindParam(r)
+	c, ok := counters[kind]
+	if !ok {
+		http.Error(w, "unknown kind，可选：mutex / atomic / sharded", http.StatusBadRequest)
+		return
+	}
+
 	workers := clamp(intParam(r, "workers", 50), 1, 1000)
 	perWorker := clamp(intParam(r, "perWorker", 1000), 1, 100000)
+
+	before := c.Value()
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -135,20 +180,21 @@ func handleInc(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < perWorker; j++ {
-				counter.Inc()
+				c.Inc()
 			}
 		}()
 	}
 	wg.Wait()
 
 	expected := int64(workers) * int64(perWorker)
-	got := counter.Value()
+	got := c.Value() - before
 
+	fmt.Fprintf(w, "kind       = %s\n", kind)
 	fmt.Fprintf(w, "goroutines = %d, perWorker = %d\n", workers, perWorker)
 	fmt.Fprintf(w, "expected   = %d\n", expected)
 	fmt.Fprintf(w, "actual     = %d\n", got)
 	if got != expected {
-		fmt.Fprintf(w, "❌ 丢了 %d 次更新 —— Counter 还不并发安全\n", expected-got)
+		fmt.Fprintf(w, "❌ 丢了 %d 次更新 —— 这个 Counter 实现不并发安全\n", expected-got)
 		return
 	}
 	fmt.Fprintln(w, "✅ 一致")
@@ -175,6 +221,14 @@ func handleSum(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprintf(w, "sum(i*i, i=1..%d) = %d\n", n, total)
+}
+
+func kindParam(r *http.Request) string {
+	kind := r.URL.Query().Get("kind")
+	if kind == "" {
+		return "mutex" // 默认走最保守的实现
+	}
+	return kind
 }
 
 func intParam(r *http.Request, name string, def int) int {
