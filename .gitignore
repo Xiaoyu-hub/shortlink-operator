@@ -30,6 +30,9 @@ vendor/
 # --- agent 工作目录（nanobot 在仓库内留的会话/缓存）---
 .nanobot/
 
+# --- 本机 agent 的临时产物 ---
+.nanobot/
+
 # --- OS ---
 .DS_Store
 Thumbs.db
