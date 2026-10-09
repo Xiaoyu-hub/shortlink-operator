@@ -27,6 +27,9 @@ vendor/
 *.swp
 *.swo
 
+# --- agent 工作目录（nanobot 在仓库内留的会话/缓存）---
+.nanobot/
+
 # --- OS ---
 .DS_Store
 Thumbs.db
