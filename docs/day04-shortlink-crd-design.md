@@ -1,7 +1,7 @@
 # Day 4 — Shortlink CRD：spec / status 设计与「单源真相链」
 
 > 本日交付覆盖 ROADMAP 的 Day 4 + Day 5 范围（spec 设计 + status 设计 + 校验/defaulting + 集群实测）。
-> 提交：`db6720f`
+> 提交：`e0431fd`
 
 ## 一、交付清单
 
