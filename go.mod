@@ -10,6 +10,14 @@ require (
 	sigs.k8s.io/controller-runtime v0.25.0
 )
 
+// Windows 补丁：controller-runtime v0.25.x 的 envtest（pkg/internal/testing/process）
+// 在 Windows 上编译失败（signal_windows.go 的 signalProcess 与 process.go:132 的
+// var signalProcess 重复声明，且 signalProcessImpl 未定义；上游 v0.25.2 仍存在，见
+// third_party/controller-runtime/README.md）。这与 Day 5 起要跑的 envtest 单测直接冲突，
+// 因此用本地补丁模块替换，改动仅 1 个标识符。Linux/macOS/CI 不受影响（信号实现在
+// signal_unix.go，build tag 互斥）。
+replace sigs.k8s.io/controller-runtime => ./third_party/controller-runtime
+
 require (
 	cel.dev/expr v0.25.1 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect

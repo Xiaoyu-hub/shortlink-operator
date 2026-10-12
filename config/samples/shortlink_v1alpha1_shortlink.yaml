@@ -1,0 +1,25 @@
+apiVersion: shortlink.dev/v1alpha1
+kind: Shortlink
+metadata:
+  labels:
+    app.kubernetes.io/name: shortlink-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: shortlink-sample
+spec:
+  # 期望 2 副本；不写 replicas 时由 CRD default 补成 1
+  replicas: 2
+  # 唯一必填字段。Day 5 起由控制器渲染成 Deployment 的 container image。
+  image: ghcr.io/xiaoyu-hub/shortlink:v0.1.0
+  port: 8080
+  serviceType: ClusterIP
+  baseDomain: sh.local
+  env:
+    - name: SHORTLINK_LOG_LEVEL
+      value: info
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

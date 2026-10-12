@@ -182,9 +182,11 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 ## Location to install dependencies to
 # 本机实测（Go 1.27.1 + controller-tools v0.22.0）：`paths="./..."` 会把「模块根目录」也当成一个包去加载，
 # 而 kubebuilder 布局的模块根没有 .go 文件，于是报 `-: no Go files in <repo root>`（新建的空仓库同样复现）。
-# 因此只枚举「当前真实存在」的包目录，用 make 自带的 wildcard（不依赖 shell）筛选。
-# 注意：make 本身要在 MSYS2 / Git Bash 里跑（Makefile 里有 pwd、mkdir -p、管道）。详见 docs/day03-local-cluster-and-scaffold.md
-PKG_PATHS := $(foreach d,$(wildcard cmd api internal pkg),paths=./$(d)/...)
+# 同理 `paths=./api/...` 会把 `api/` 目录自身当包加载，而 api/ 下只有 v1alpha1/ 子包、没有 .go 文件，
+# 于是报 `-: no Go files in <repo>/api`（Day 4 新建 api/ 时实测踩到）。
+# 因此改为枚举「真正含 .go 文件」的目录，逐个用 dir 精确加载（不带 /...）。
+# 注意：make 本身要在 MSYS2 / Git Bash 里跑（Makefile 里有 pwd、mkdir -p、find 管道）。详见 docs/day03-local-cluster-and-scaffold.md
+PKG_PATHS := $(foreach d,$(shell find cmd api internal pkg -type f -name '*.go' 2>/dev/null | xargs -n1 dirname 2>/dev/null | sort -u),paths=./$(d))
 
 LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
