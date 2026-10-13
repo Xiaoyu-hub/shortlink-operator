@@ -27,8 +27,10 @@ import (
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -38,13 +40,19 @@ import (
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
+//
+// 与 Day 5 前的骨架不同：这里真正启动了 manager（控制循环），所以测试是
+// 「创建 CR → Deployment/Service 被 watch 驱动自动调和」，而不是手调 Reconcile。
+// 这就是 envtest 真控制循环：etcd + kube-apiserver 都是真实的，只是没有
+// kube-controller-manager / scheduler / GC 这些集群组件（其影响见 day05 文档）。
 
 var (
-	ctx       context.Context
-	cancel    context.CancelFunc
-	testEnv   *envtest.Environment
-	cfg       *rest.Config
-	k8sClient client.Client
+	ctx        context.Context
+	cancel     context.CancelFunc
+	testEnv    *envtest.Environment
+	cfg        *rest.Config
+	k8sManager ctrl.Manager
+	k8sClient  client.Client
 )
 
 func TestControllers(t *testing.T) {
@@ -80,6 +88,30 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
+	By("starting the manager with the Shortlink controller (real control loop)")
+	k8sManager, err = ctrl.NewManager(cfg, ctrl.Options{
+		Scheme: scheme.Scheme,
+		// 测试里关掉 metrics 端口，避免端口冲突；健康探针默认不启用
+		Metrics: metricsserver.Options{BindAddress: "0"},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	err = (&ShortlinkReconciler{
+		Client: k8sManager.GetClient(),
+		Scheme: k8sManager.GetScheme(),
+	}).SetupWithManager(k8sManager)
+	Expect(err).NotTo(HaveOccurred())
+
+	go func() {
+		defer GinkgoRecover()
+		Expect(k8sManager.Start(ctx)).NotTo(HaveOccurred())
+	}()
+
+	// 等 informer 缓存同步完成，否则立刻写 CR 可能撞上「还没开始 watch」的窗口
+	By("waiting for informer caches to sync")
+	Expect(k8sManager.GetCache().WaitForCacheSync(ctx)).To(BeTrue())
+
+	// 测试用的直连客户端（不走缓存，读到的就是 API Server 的最新状态）
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
