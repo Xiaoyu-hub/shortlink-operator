@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // 设计原则（Day 4）：
@@ -119,6 +120,19 @@ type ShortlinkSpec struct {
 	// +optional
 	// +kubebuilder:default=false
 	Paused bool `json:"paused,omitempty"`
+
+	// maxSurge / maxUnavailable 控制滚动更新的节奏，语义与 Deployment 完全一致
+	//（可写百分比 "25%" 或绝对数 1）。
+	//
+	// 刻意用指针且**不给 CRD 默认值**：nil 的语义是「本 operator 不声明这个字段」，
+	// 于是控制器既不写它、也不比较它，让 Deployment 自己的默认值（25%/25%）生效。
+	// 这与 replicas 的指针语义同源——必须区分「用户声明了」与「用户没声明」，
+	// 否则控制器会去和 API Server 的默认值较劲，形成永久偏移。
+	// +optional
+	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
+
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // ShortlinkStatus 描述控制器观测到的真实状态。

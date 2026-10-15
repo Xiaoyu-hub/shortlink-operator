@@ -418,6 +418,12 @@ func appLabels(cr *shortlinkv1alpha1.Shortlink) map[string]string {
 	}
 }
 
+// desiredDeployment 从 CR 构造期望的 Deployment（纯函数：只读 cr，不碰集群）。
+//
+// 一个必须记住的边界：本函数**只设置**下面这些字段，但写入路径是整体覆盖
+// （actual.Spec = desired.Spec），于是 spec 里"本函数不设置、也不比较"的字段会被抹回默认值
+// （例如别人手工设的 minReadySeconds、strategy 里没声明的项）——实测见 docs/day06 第 7.2 节。
+// 要管一个字段，就必须**同时**加进本函数与 deploymentNeedsUpdate。
 func desiredDeployment(cr *shortlinkv1alpha1.Shortlink) *appsv1.Deployment {
 	labels := appLabels(cr)
 	replicas := desiredReplicas(cr)
@@ -433,6 +439,7 @@ func desiredDeployment(cr *shortlinkv1alpha1.Shortlink) *appsv1.Deployment {
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{labelInstance: cr.Name},
 			},
+			Strategy: desiredStrategy(cr),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
@@ -442,9 +449,42 @@ func desiredDeployment(cr *shortlinkv1alpha1.Shortlink) *appsv1.Deployment {
 						Ports:     []corev1.ContainerPort{{Name: httpPortName, ContainerPort: port, Protocol: corev1.ProtocolTCP}},
 						Env:       cr.Spec.Env,
 						Resources: cr.Spec.Resources,
+						// 就绪探针决定 Pod 何时算「就绪」。没有它时 readyReplicas 只代表
+						// "容器进程起来了"，滚动更新也就失去意义（新旧 Pod 无法区分就绪与否）。
+						//
+						// 这里用 TCP 探针而不是 HTTPGet：TCP 只验证端口可连，对任何镜像都成立，
+						// 适合作为 operator 的默认值。真实项目应改成 HTTPGet（如 /healthz）——
+						// 只有 HTTP 探针才能证明「业务可用」，TCP 只能证明「端口开着」。
+						// 所有字段都显式写出，避免与 API Server 的探针默认值产生比较噪音。
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
+							},
+							InitialDelaySeconds: 2,
+							PeriodSeconds:       5,
+							TimeoutSeconds:      2,
+							SuccessThreshold:    1,
+							FailureThreshold:    3,
+						},
 					}},
 				},
 			},
+		},
+	}
+}
+
+// desiredStrategy 把 CR 的滚动参数翻译成 Deployment 的滚动策略。
+// 两个字段都没声明时返回零值——让 API Server 自己的默认（RollingUpdate 25%/25%）生效，
+// 而不是把 25% 这个数字抄进我们的代码里（抄了就要跟着 K8s 版本走）。
+func desiredStrategy(cr *shortlinkv1alpha1.Shortlink) appsv1.DeploymentStrategy {
+	if cr.Spec.MaxSurge == nil && cr.Spec.MaxUnavailable == nil {
+		return appsv1.DeploymentStrategy{}
+	}
+	return appsv1.DeploymentStrategy{
+		Type: appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{
+			MaxSurge:       cr.Spec.MaxSurge,
+			MaxUnavailable: cr.Spec.MaxUnavailable,
 		},
 	}
 }
@@ -513,11 +553,68 @@ func deploymentNeedsUpdate(actual, desired *appsv1.Deployment) bool {
 			ac[i].Image != dc[i].Image ||
 			!reflect.DeepEqual(ac[i].Env, dc[i].Env) ||
 			!reflect.DeepEqual(ac[i].Resources, dc[i].Resources) ||
-			!containerPortsEqual(ac[i].Ports, dc[i].Ports) {
+			!containerPortsEqual(ac[i].Ports, dc[i].Ports) ||
+			!readinessProbeEqual(ac[i].ReadinessProbe, dc[i].ReadinessProbe) {
 			return true
 		}
 	}
+	return rollingUpdateDiffers(actual.Spec.Strategy, desired.Spec.Strategy)
+}
+
+// readinessProbeEqual 只比对本 operator 显式声明的探针字段。
+// 为什么不整体 DeepEqual：Probe 在准入时会被补默认值（TimeoutSeconds/PeriodSeconds/
+// SuccessThreshold/FailureThreshold…），整体比对恒为不相等 —— 与 Day 5 学的 defaulting 陷阱同源。
+func readinessProbeEqual(actual, desired *corev1.Probe) bool {
+	if actual == nil || desired == nil {
+		return actual == desired
+	}
+	at, dt := actual.TCPSocket, desired.TCPSocket
+	if (at == nil) != (dt == nil) {
+		return false
+	}
+	if at != nil && at.Port.String() != dt.Port.String() {
+		return false
+	}
+	return actual.InitialDelaySeconds == desired.InitialDelaySeconds &&
+		actual.PeriodSeconds == desired.PeriodSeconds &&
+		actual.TimeoutSeconds == desired.TimeoutSeconds &&
+		actual.SuccessThreshold == desired.SuccessThreshold &&
+		actual.FailureThreshold == desired.FailureThreshold
+}
+
+// rollingUpdateDiffers 处理「条件性所有权」：CR 没声明滚动参数时，期望是零值，
+// 此时**不比较**——nil 的语义是「我不管这个字段」，让 Deployment 的默认值（25%）生效。
+// 一旦声明了，对应字段就进入比较集合，偏移会被拉回。
+//
+// 比较集合可以是条件性的，但条件必须与写入意图一致：写它才比它，不写它就别比它。
+func rollingUpdateDiffers(actual, desired appsv1.DeploymentStrategy) bool {
+	if desired.Type != "" && actual.Type != desired.Type {
+		return true
+	}
+	ar, dr := actual.RollingUpdate, desired.RollingUpdate
+	if dr == nil {
+		return false
+	}
+	if ar == nil {
+		return true
+	}
+	if dr.MaxSurge != nil && !intOrStringEqual(ar.MaxSurge, dr.MaxSurge) {
+		return true
+	}
+	if dr.MaxUnavailable != nil && !intOrStringEqual(ar.MaxUnavailable, dr.MaxUnavailable) {
+		return true
+	}
 	return false
+}
+
+// intOrStringEqual 按字符串形态比较 IntOrString。
+// 不用 reflect.DeepEqual：两种表示（Type=Int 的 1 与 Type=String 的 "1"）语义相同却判为不等。
+// 这里不假设 API Server 会归一化表示形式，取保守写法。
+func intOrStringEqual(a, b *intstr.IntOrString) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.String() == b.String()
 }
 
 func containerPortsEqual(a, b []corev1.ContainerPort) bool {

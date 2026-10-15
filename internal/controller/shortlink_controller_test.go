@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	shortlinkv1alpha1 "github.com/Xiaoyu-hub/shortlink-operator/api/v1alpha1"
@@ -449,6 +450,66 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			}, timeout, interval).Should(Equal(int32(0)))
 		})
 	})
+
+	Context("就绪探针与滚动策略（比较与写入一起加）", func() {
+		It("声明的 maxSurge/maxUnavailable 与 readinessProbe 都落到 Deployment 上；只改 maxSurge 也会被推进", func() {
+			name := "probe-strategy"
+			surge, unavailable := intstr.FromInt32(1), intstr.FromInt32(0)
+			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
+				s.Spec.MaxSurge = &surge
+				s.Spec.MaxUnavailable = &unavailable
+			}))).To(Succeed())
+
+			var d appsv1.Deployment
+			Eventually(func() error {
+				return k8sClient.Get(ctx, objectKey(name), &d)
+			}, timeout, interval).Should(Succeed())
+
+			By("readinessProbe 落到了容器上（没有它，readyReplicas 只代表进程起来）")
+			probe := d.Spec.Template.Spec.Containers[0].ReadinessProbe
+			Expect(probe).NotTo(BeNil())
+			Expect(probe.TCPSocket).NotTo(BeNil())
+			Expect(probe.TCPSocket.Port.IntValue()).To(Equal(8080))
+			Expect(probe.PeriodSeconds).To(Equal(int32(5)))
+
+			By("滚动参数落到了 strategy 上")
+			Eventually(func() string {
+				return deploymentMaxSurge(name)
+			}, timeout, interval).Should(Equal("1"))
+			Expect(d.Spec.Strategy.RollingUpdate.MaxUnavailable.String()).To(Equal("0"))
+
+			By("只改 maxSurge → 必须被推进（证明它在比较集合里，而不是只被写不被比）")
+			bigger := intstr.FromInt32(2)
+			Eventually(func() error {
+				var s shortlinkv1alpha1.Shortlink
+				if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
+					return err
+				}
+				s.Spec.MaxSurge = &bigger
+				return k8sClient.Update(ctx, &s)
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func() string {
+				return deploymentMaxSurge(name)
+			}, timeout, interval).Should(Equal("2"))
+		})
+
+		It("CR 不声明滚动参数时，控制器不与 Deployment 的默认值较劲（nil = 不管）", func() {
+			name := "strategy-default"
+			Expect(k8sClient.Create(ctx, newTestShortlink(name, nil))).To(Succeed())
+
+			var d appsv1.Deployment
+			Eventually(func() error {
+				return k8sClient.Get(ctx, objectKey(name), &d)
+			}, timeout, interval).Should(Succeed())
+
+			// API Server 会把滚动参数补成默认的 25%。我们不声明、不比较，所以它必须原样保持——
+			// 若哪天有人把 strategy 无条件加进比较集合，这条会立刻变红。
+			Consistently(func() string {
+				return deploymentMaxSurge(name)
+			}, 2*time.Second, interval).Should(Equal("25%"))
+		})
+	})
 })
 
 // ---- 测试辅助 ----
@@ -499,6 +560,18 @@ func shortlinkObservedGeneration(name string) (observed, generation int64) {
 		return -1, -1
 	}
 	return s.Status.ObservedGeneration, s.Generation
+}
+
+// deploymentMaxSurge 读 Deployment 的 maxSurge 字符串形态（"1" / "25%"）。
+func deploymentMaxSurge(name string) string {
+	var d appsv1.Deployment
+	if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil {
+		return ""
+	}
+	if d.Spec.Strategy.RollingUpdate == nil || d.Spec.Strategy.RollingUpdate.MaxSurge == nil {
+		return ""
+	}
+	return d.Spec.Strategy.RollingUpdate.MaxSurge.String()
 }
 
 // deploymentMinReadySeconds 读 Deployment 的 spec.minReadySeconds（本 operator 不管这个字段）。

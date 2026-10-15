@@ -244,6 +244,24 @@ spec:
                   不给 default 是有意的：镜像版本属于用户意图，控制器不该替用户猜一个版本。
                 minLength: 1
                 type: string
+              maxSurge:
+                anyOf:
+                - type: integer
+                - type: string
+                description: |-
+                  maxSurge / maxUnavailable 控制滚动更新的节奏，语义与 Deployment 完全一致
+                  （可写百分比 "25%" 或绝对数 1）。
+
+                  刻意用指针且**不给 CRD 默认值**：nil 的语义是「本 operator 不声明这个字段」，
+                  于是控制器既不写它、也不比较它，让 Deployment 自己的默认值（25%/25%）生效。
+                  这与 replicas 的指针语义同源——必须区分「用户声明了」与「用户没声明」，
+                  否则控制器会去和 API Server 的默认值较劲，形成永久偏移。
+                x-kubernetes-int-or-string: true
+              maxUnavailable:
+                anyOf:
+                - type: integer
+                - type: string
+                x-kubernetes-int-or-string: true
               paused:
                 default: false
                 description: paused 为 true 时控制器只维护 status、不再推进底层资源（故障演练/排障开关）。
