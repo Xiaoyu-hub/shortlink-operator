@@ -372,6 +372,47 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			}, timeout, interval).Should(Equal(shortlinkv1alpha1.ReasonReplicasNotReady))
 		})
 	})
+
+	// 已知缺口（docs/day06 遗留 #1）：selector 不在比较集合里、却在写入集合里。
+	// 这条用例把"静默接受 → 直到被比较的字段也漂移才响亮失败"这个两段式行为钉住：
+	// 将来若决定"报告 selector 漂移"，它会失败，从而提醒改文档与改断言。
+	Context("已知缺口：外部改了 selector", func() {
+		It("selector 被改窄时控制器不比较它（静默接受）；直到被比较的字段也漂移才因不可变而报错", func() {
+			name := "selector-drift"
+
+			By("预置同名 Deployment：selector 改窄（仍匹配 template labels，因此合法），改窄后与期望不同")
+			occupied := desiredDeploymentForTest(name)
+			narrowed := map[string]string{labelInstance: name, labelAppName: appNameValue}
+			occupied.Spec.Selector.MatchLabels = narrowed
+			Expect(k8sClient.Create(ctx, occupied)).To(Succeed())
+			Expect(k8sClient.Create(ctx, newTestShortlink(name, nil))).To(Succeed())
+
+			By("第 ① 段：只有 selector 漂移 —— 比较集合里没有偏移，控制器零写入、照常推进 obsGen")
+			Eventually(func() bool {
+				obs, gen := shortlinkObservedGeneration(name)
+				return obs == gen && gen > 0
+			}, timeout, interval).Should(BeTrue())
+			Consistently(func() string {
+				return readyReason(name)
+			}, 1*time.Second, interval).ShouldNot(Equal(shortlinkv1alpha1.ReasonDeploymentReconcileFailed))
+			// 关键：controller 不会把它纠正回来（selector 不可变，且我们根本不比较它）
+			Expect(deploymentSelectorLabels(name)).To(Equal(narrowed))
+
+			By("第 ② 段：改 spec.image（被比较字段）→ 触发覆写 → selector 被一起提交 → 不可变拒绝 → 响亮失败")
+			Eventually(func() error {
+				var s shortlinkv1alpha1.Shortlink
+				if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
+					return err
+				}
+				s.Spec.Image = "ghcr.io/xiaoyu-hub/shortlink:v0.2.0"
+				return k8sClient.Update(ctx, &s)
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func() string {
+				return readyReason(name)
+			}, timeout, interval).Should(Equal(shortlinkv1alpha1.ReasonDeploymentReconcileFailed))
+		})
+	})
 })
 
 // ---- 测试辅助 ----
@@ -422,6 +463,15 @@ func shortlinkObservedGeneration(name string) (observed, generation int64) {
 		return -1, -1
 	}
 	return s.Status.ObservedGeneration, s.Generation
+}
+
+// deploymentSelectorLabels 读 Deployment 的实际 selector，用来观察"控制器有没有纠正漂移"。
+func deploymentSelectorLabels(name string) map[string]string {
+	var d appsv1.Deployment
+	if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil {
+		return nil
+	}
+	return d.Spec.Selector.MatchLabels
 }
 
 // readyReason 读 CR 上 Ready 条件的 Reason；条件还不存在时返回空串。

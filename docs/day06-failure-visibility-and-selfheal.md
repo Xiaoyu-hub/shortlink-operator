@@ -170,11 +170,41 @@ ok  github.com/Xiaoyu-hub/shortlink-operator/internal/controller   35.4s   （7 
 ok  .../warmup  ok  .../warmup/cmd
 ```
 
-## 七、遗留与发现
+## 七、一条设计原则：`Ready` 回答"能不能用"，不回答"是否逐字满足"
+
+selector 漂移这个案例引出的原则，值得单独记一节（已写进 `api/v1alpha1/shortlink_types.go`
+的 `ConditionReady` 注释）：
+
+- **`Ready` 是给消费者看的契约**：`kubectl wait --for=condition=Ready`、告警规则、SLO 口径、
+  上游 operator（"等 Shortlink Ready 再挂 Ingress"）都问同一件事——**现在能不能用它**。
+- **把"配置漂移"混进"可用性"会毁掉这个信号**：
+  - `kubectl wait` / 发布流水线被永久阻塞；
+  - 监控把"可用"报成"不可用" → 误报淹没真故障（告警疲劳）；
+  - 上游依赖者基于错误的可用性做决策。
+- **什么才该让 `Ready=False`**：期望的服务能力没达成——副本没起来、Deployment 不可用、
+  子资源根本没建出来。都是"消费者此刻不能用"。
+- **"spec 没被逐字满足"放哪儿**：独立条件（如 `SpecDiverged`）+ Warning 事件。
+  消费者读 `Ready` 决定能不能用，运维读 `SpecDiverged` 决定要不要人工介入，两者不互相污染
+  ——这正是 Day 4 选 `metav1.Condition` 而非单个 Phase 字符串的收益在这里兑现。
+
+通用形式（面试可直接说）：**条件的语义应由"观察者的问题"定义，而不是由"控制器的实现细节"定义。**
+
+### 7.1 实测：selector 漂移的两段式行为（`go test`，用例见 `selector-drift`）
+
+补一条用例把上面的分析钉成实测（8 specs 全绿）：
+
+| 阶段 | 操作 | 实测结果 |
+|------|------|----------|
+| ① | 预置同名 Deployment，selector 被**改窄**（仍匹配 template labels，因此对象合法） | 控制器**零写入、不报错**、`observedGeneration` 照常追平；selector 保持被改窄的样子（**静默且持久**） |
+| ② | 再改 `spec.image`（**被比较**的字段） | 覆写被触发 → selector 随整体覆盖一起提交 → API Server 以「不可变」拒绝 → `Ready=False/DeploymentReconcileFailed`（**响亮失败**） |
+
+⇒ **同一处漂移，命运取决于"有没有别的字段先动"**：没有 → 静默；有 → 响亮。这就是"比较集合 != 写入集合"的可观测后果。
+
+## 八、遗留与发现
 
 | # | 事项 | 说明 |
 |---|------|------|
-| 1 | **selector 在写入集合里、不在比较集合里** | `deploymentNeedsUpdate` 不比较 `Spec.Selector`，但覆写分支会写它。这是 day02"裂缝 1"的具体实例。**两种后果都存在，取决于外来的 selector 改动是否仍匹配 template labels**：<br>① 改了 `instance` 值、或加了 template labels 里不存在的键 → API Server 直接拒绝（selector 必须匹配 template labels），或必须连带改 template labels → 而 template labels **在**比较集合里 → 控制器发现偏移 → 覆写 → 被 selector 不可变拒绝 → **响亮失败**（5.2 用例的场景）；<br>② 把 selector 收窄、或加一个 template labels 里**已有**的键 → 对象合法、template labels 未变、控制器不比较 selector → **静默且持久**的偏离，且 selector 不可变，永远修不回来。<br>**注意修法不是"把 selector 加进比较集合"**——那会把①的"一次性报错"变成**每次调和都报错**（无限退避 + Ready 常驻 False），把局部瑕疵升级成对象级故障。正确方向是**报告而非修复**：检测到不可变字段与期望不符时，只写 Warning 事件 + 专门 Reason，不尝试写回 |
+| 1 | **selector 在写入集合里、不在比较集合里** | `deploymentNeedsUpdate` 不比较 `Spec.Selector`，但覆写分支会写它。这是 day02"裂缝 1"的具体实例。**两种后果都存在，取决于外来的 selector 改动是否仍匹配 template labels**：<br>① 改了 `instance` 值、或加了 template labels 里不存在的键 → API Server 直接拒绝（selector 必须匹配 template labels），或必须连带改 template labels → 而 template labels **在**比较集合里 → 控制器发现偏移 → 覆写 → 被 selector 不可变拒绝 → **响亮失败**（5.2 用例的场景）；<br>② 把 selector 收窄、或加一个 template labels 里**已有**的键 → 对象合法、template labels 未变、控制器不比较 selector → **静默且持久**的偏离，且 selector 不可变，永远修不回来。<br>**注意修法不是"把 selector 加进比较集合"**——那会把①的"一次性报错"变成**每次调和都报错**（无限退避 + Ready 常驻 False），把局部瑕疵升级成对象级故障。正确方向是**报告而非修复**：检测到不可变字段与期望不符时，只写 Warning 事件 + 专门 Reason，不尝试写回（两段式行为的实测见 7.1） |
 | 2 | 失败不重试的分类 | 目前所有 err 都退避重试；终态错误（如 5.2 的不可变冲突）会无限重试。Day 7+ 可加"终态错误"识别 |
 | 3 | 滚动策略 + readinessProbe | 挪到 Day 7（probe 需真集群才看得出效果）；注意 `needsUpdate` 的比较集合要同步扩 |
 | 4 | 零写入测试 | 待做：计数 `RoundTripper`（见 day05 第十节 10.4） |
