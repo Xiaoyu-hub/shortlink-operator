@@ -143,9 +143,20 @@ SUCCESS! -- 5 Passed | 0 Failed | 0 Pending | 0 Skipped
 
 ## 九、下一步
 
-- Day 5 面试题 5 问待作答（见聊天）；答对进 Day 6：自愈专项用例（删 Deployment 自动重建已有机制，
-  补为正式测试）+ 事件记录 + 滚动策略字段（maxUnavailable/maxSurge）。
+- Day 5 的问答与复盘已并入 `docs/day05`（见第十节勘误）与下面的 9.1；Day 6 按 9.1 执行。
 - `make test` 在本机仍会卡在 setup-envtest（DNS 劫持），已在第二节备注绕过路径；CI（Linux）无此问题。
+
+### 9.1 Day 6 待办清单（Day 5 复盘产出，按依赖排序）
+
+| # | 事项 | 来源 / 为什么现在做 |
+|---|------|---------------------|
+| 1 | **自愈专项用例**：删 Deployment → 自动重建 | 机制已具备（`Owns` + 先查后建），缺的是把它**固化成测试**。断言必须有「新对象 UID ≠ 旧 UID」，并同时验证 ownerReference 与 spec 一致 |
+| 2 | **失败 condition + 事件记录** | 现在子资源调和失败只 `return err`，status 一个字不写 → 外部只看到 `Ready=True`（陈旧值）。要补：`Ready=False` + 区分 `ReplicasNotReady` / `DeploymentNotAvailable`、message 带 err；加 `EventRecorder` 与 `events` RBAC |
+| 3 | **滚动策略 + readinessProbe** | `spec.strategy.maxUnavailable/maxSurge` 进 CRD；probe 进 pod template —— **有 probe 才谈得上"滚动零中断"**。注意 `deploymentNeedsUpdate` 的比较集合要同步扩：**比较集合必须等于写入集合** |
+| 4 | **零写入测试** | 见 10.4：`resourceVersion` 测不出多余写请求，需包一层计数 `RoundTripper` 数请求 |
+| 5 | **接管守卫** | `r.Get` 到同名子资源后先 `metav1.IsControlledBy(actual, cr)`，不是自己的就拒绝改写并报事件（防静默接管） |
+| 6 | **（若引入）finalizer 走单轮式** | 见 10.5/finalizer 实测：先落地 finalizer 再动外部世界，且不依赖"加完 finalizer 会再来一轮" |
+| 7 | **`paused` 语义加测试锁定** | 语义已在勘误中定案为「冻结 = 完全不干预」，需要一条测试把它钉住，防止后人改回"缩到 0" |
 
 ## 十、勘误（2026-10-15 用真 kube-apiserver 实测修正）
 
@@ -227,5 +238,32 @@ watch 事件**（修复语义发生在比对之前）。于是：
 > 本节机制层面的定位（no-op 写在 apiserver 的哪一层被 dedupe 掉）未做源码级确认，只做了行为实测；
 > 实测版本为 envtest 内的 k8s 1.37，属版本相关行为，跨版本需复验。
 >
-> 本次实测用的探针脚本在 `hack/defaulting-probe/`（本机未纳入版本管理：尚未过 golangci-lint，
-> 待改写成 lint-clean 后再固化进仓库）。
+> 本次实测用的探针脚本在 `hack/defaulting-probe/`，另有 `hack/finalizer-probe/`（见 10.5）。
+> 两者都是对着真 kube-apiserver 压实验的小工具，已入库；`go run ./hack/defaulting-probe` 可复现下面的全部结论。
+
+### 10.5 勘误：`deletionTimestamp` 会 bump generation（finalizer 不会被 predicate 卡死）
+
+常见说法（我也一度这么讲）：CRD 的 `metadata.generation` 只在 spec 变化时递增，所以
+`For(&X{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))` 会**滤掉"删除开始"的事件**，
+导致 finalizer 永远等不到清理机会、对象卡在 Terminating。
+
+用真 CRD + 真 predicate 实测（`go run ./hack/finalizer-probe`，复跑两次一致）：
+
+| 步骤 | `metadata.generation` | predicate 放行？ |
+|------|----------------------|------------------|
+| 1. 创建 CR | 1 | — |
+| 2. 改 `spec.port` | 1 → 2 | ✅ 放行 |
+| 3. **只加 finalizer**（纯 metadata 变化） | 2 → **2** | ❌ **被过滤** |
+| 4. **delete（finalizer 在 → 设置 `deletionTimestamp`）** | 2 → **3** | ✅ **放行** |
+| 5. 移除 finalizer | — | 对象随即消失 |
+
+结论：
+
+1. **"删除开始"会 bump generation**（至少在本实测版本 k8s 1.37），所以**不会**卡死。原说法与版本相关，
+   我未对更早版本做实测——**工程上不要依赖它**：要跨版本稳妥，就在 predicate 上显式覆写 `Update`
+   放行 `deletionTimestamp` 变化（或对 finalizer 场景改用 `ResourceVersionChangedPredicate`）。
+2. **"加 finalizer"那一次更新确实被过滤**（第 3 步）→ 因此**不要写跨轮次依赖 finalizer 的控制器**：
+   `轮 1 只加 finalizer 然后 return、轮 2 再干活` 这种结构，轮 2 不会被这次更新唤醒。
+   正确写法是**单轮式**：同一轮里判定 finalizer 不存在 → 加上 → 不 return，继续把活干完。
+3. **顺序不变量**：finalizer 是「对象被删时一定有人来打扫」的凭证，所以**必须先让 finalizer 落地，
+   再去创建/修改外部资源**。反过来做（先建外部资源、进程崩溃、finalizer 没写上），会留下无人回收的孤儿资源。

@@ -56,6 +56,9 @@ linters:
       - third_party$
       - builtin$
       - examples$
+      # hack/ 下是本地取证探针（对着真 kube-apiserver 压实验用的小工具），
+      # 不是产品代码，不参与 lint；gofmt 仍然管它们。
+      - hack$
 formatters:
   enable:
     - gofmt
