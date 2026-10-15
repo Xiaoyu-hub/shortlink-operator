@@ -63,7 +63,8 @@
 #### Day 8 — 幂等与更新路径
 - 任务：Diff 检测——镜像/副本/标签变了才 Update；改用 `ctrl.CreateOrUpdate` 重写为幂等
 - 产出：reconcile 对「无变化」场景零 API 写入
-- 自检：连续触发 10 次 reconcile，resourceVersion 不变
+- 自检：连续触发 10 次 reconcile，resourceVersion 不变（注意：该判据只能证明「没落盘」，
+  证明不了「没发多余请求」——判据过宽时 API Server 会 dedupe 掉 no-op 写，见 docs/day05 第十节 10.4）
 
 #### Day 9 — 调和 Service + HPA
 - 任务：Service（复用项目一 selector/port）；spec 声明 min/max/cpuTarget → 按需 create/delete HPA
@@ -302,7 +303,7 @@
 
 ### 问 7：reconcile 为什么会反复触发？为什么必须幂等？
 **诚实回答**：
-> watch 到三类变化都会触发：CR 变化、我管理的子资源（Deployment/Service/HPA）变化、以及我写入的 status 变化。所以同一期望状态会被调度器重复调和——reconcile 必须幂等：先 diff 期望与现实，只有不一致才写。我用「连续 10 次 reconcile、resourceVersion 不变」作为幂等的可验证证据。
+> watch 到三类变化都会触发：CR 变化、我管理的子资源（Deployment/Service/HPA）变化、以及我写入的 status 变化。所以同一期望状态会被调度器重复调和——reconcile 必须幂等：先 diff 期望与现实，只有不一致才写。验证要分两层：`resourceVersion` 不变只能证明「没有落盘写入」（API Server 会把净效果相同的写请求 dedupe 掉，所以它证明不了「没发多余请求」）；要证明零请求得包一层计数 RoundTripper 数写请求。实测见 docs/day05 第十节 10.4。
 
 ### 问 8：leader election 怎么实现？为什么要多副本？
 **诚实回答**：
