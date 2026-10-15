@@ -45,7 +45,8 @@ status.conditions[Ready]  = True ← 陈旧结论，且没有任何东西指出"
 
 | 分类 | 字段 | 更新时机 | 理由 |
 |------|------|----------|------|
-| **可观测量** | `readyReplicas`、`url` | 每次观测都刷新（成功/失败/冻结都刷） | 它们是"我看到了什么"，不是"我做到了什么"；越新越准 |
+| **可观测量** | `readyReplicas` | 每次观测都刷新（成功/失败/冻结都刷） | 它来自集群的真实观测（`Deployment.status`），越新越准 |
+| **派生值** | `url` | 每次调和都重算（成功/失败/冻结都刷） | 它由 **spec** 算出（`baseDomain`/`port`），不是观测来的；重算无害。注意它跟随的是**意图**而不是现状——失败/冻结时它指向的是"将来可达"的地址（边界的讨论见第七节遗留 #6） |
 | **结论** | `observedGeneration`、`conditions[Ready]` | **只有成功走完一轮**才更新 | 它们是"对最新 spec 的判断"，失败时推进就等于谎报收敛 |
 
 这条划分同时解释了两处已有的设计：冻结（paused）时 `advanceGeneration=false`，以及现在的失败路径。
@@ -178,3 +179,4 @@ ok  .../warmup  ok  .../warmup/cmd
 | 3 | 滚动策略 + readinessProbe | 挪到 Day 7（probe 需真集群才看得出效果）；注意 `needsUpdate` 的比较集合要同步扩 |
 | 4 | 零写入测试 | 待做：计数 `RoundTripper`（见 day05 第十节 10.4） |
 | 5 | 接管守卫 | 待做：`metav1.IsControlledBy`（5.2 的场景在加了守卫后会变成另一种失败原因） |
+| 6 | `url` 的分类边界 | 现在按"派生值"处理、每次调和都刷新。若把 `url` 当成对用户的**承诺**（"服务现在在这里"），它就该被 `observedGeneration` 门控、只在成功时更新；代价是失败期间 status 不再新鲜。当前选择"刷新 + 靠 obsGen/Ready 表达未收敛"，需要时再改 |
