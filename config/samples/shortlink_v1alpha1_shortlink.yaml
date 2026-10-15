@@ -9,8 +9,16 @@ spec:
   # 期望 2 副本；不写 replicas 时由 CRD default 补成 1
   replicas: 2
   # 唯一必填字段。Day 5 起由控制器渲染成 Deployment 的 container image。
+  #
+  # 本地 k3d 演示请改成节点里真实存在的镜像（例如 nginx:1.27，用 hack/build-local-image.sh
+  # 之类的方式导入过）——注意不要用 :latest，它会让默认 imagePullPolicy 变成 Always，
+  # 于是离线导入的镜像会被忽略、Pod 卡在 ImagePullBackOff。实测踩过，见 docs/day07。
   image: ghcr.io/xiaoyu-hub/shortlink:v0.1.0
   port: 8080
+  # 滚动更新节奏（语义与 Deployment 完全一致，可写 "25%" 或 1）。
+  # 不写 = 本 operator 不声明该字段，交给 Deployment 自己的默认值（25%/25%）。
+  maxSurge: 1
+  maxUnavailable: 0
   serviceType: ClusterIP
   baseDomain: sh.local
   env:
