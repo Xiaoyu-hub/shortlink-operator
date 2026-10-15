@@ -175,7 +175,18 @@ func main() {
 		// the manager stops, so would be fine to enable this option. However,
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		//
+		// 本项目开启它，并在真集群做过 A/B 实测（docs/day08）：
+		//   关闭时：删掉 leader Pod → 待命副本只能等租约自然过期（leaseDuration=15s，实测接管 20s）；
+		//   开启后：leader 收到 SIGTERM 时主动把租约释放成空 holder → 实测新 leader
+		//     1~2 秒内接管（两次复测一致，租约轨迹里能看到 holder=[] 的中间态）。
+		// 前提是"收到信号后进程立即退出"——本项目 mgr.Start 返回后直接结束、没有清理动作，
+		// 所以安全；若将来在 Start 之后加了清理逻辑，需要重新评估这个开关。
+		//
+		// 实测踩到的运维坑：用**同一个镜像 tag** 重新 make deploy 不会重启 Pod
+		//（Pod 模板没变 → 不触发滚动更新），于是"换了二进制"是幻觉——leader 还在跑旧进程。
+		// 换二进制必须显式 `kubectl rollout restart` 或改 tag。
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
