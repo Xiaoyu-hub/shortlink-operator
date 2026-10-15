@@ -413,6 +413,42 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			}, timeout, interval).Should(Equal(shortlinkv1alpha1.ReasonDeploymentReconcileFailed))
 		})
 	})
+
+	// 同一类缺口的"安静"变体：**可变**却不在比较集合里的字段，会被覆写顺带抹掉 ——
+	// 不报错、不留痕，比 selector 那种"响亮失败"更隐蔽。
+	Context("已知缺口：不在比较集合里的可变字段", func() {
+		It("别人设置的 spec.minReadySeconds 会被覆写顺带抹回零（静默失效）", func() {
+			name := "mutable-wipe"
+			Expect(k8sClient.Create(ctx, newTestShortlink(name, nil))).To(Succeed())
+
+			var d appsv1.Deployment
+			Eventually(func() error {
+				return k8sClient.Get(ctx, objectKey(name), &d)
+			}, timeout, interval).Should(Succeed())
+
+			By("模拟运维手工把 minReadySeconds 调成 30（本 operator 既不声明也不比较这个字段）")
+			d.Spec.MinReadySeconds = 30
+			Expect(k8sClient.Update(ctx, &d)).To(Succeed())
+			// 只有它漂移时，控制器零写入、不动它 —— 与 selector 用例第 ① 段同构
+			Consistently(func() int32 {
+				return deploymentMinReadySeconds(name)
+			}, 1*time.Second, interval).Should(Equal(int32(30)))
+
+			By("只改 CR 的镜像（被比较字段）→ 覆写 → minReadySeconds 被一起抹回 0")
+			Eventually(func() error {
+				var s shortlinkv1alpha1.Shortlink
+				if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
+					return err
+				}
+				s.Spec.Image = "ghcr.io/xiaoyu-hub/shortlink:v0.2.0"
+				return k8sClient.Update(ctx, &s)
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func() int32 {
+				return deploymentMinReadySeconds(name)
+			}, timeout, interval).Should(Equal(int32(0)))
+		})
+	})
 })
 
 // ---- 测试辅助 ----
@@ -463,6 +499,15 @@ func shortlinkObservedGeneration(name string) (observed, generation int64) {
 		return -1, -1
 	}
 	return s.Status.ObservedGeneration, s.Generation
+}
+
+// deploymentMinReadySeconds 读 Deployment 的 spec.minReadySeconds（本 operator 不管这个字段）。
+func deploymentMinReadySeconds(name string) int32 {
+	var d appsv1.Deployment
+	if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil {
+		return -1
+	}
+	return d.Spec.MinReadySeconds
 }
 
 // deploymentSelectorLabels 读 Deployment 的实际 selector，用来观察"控制器有没有纠正漂移"。
