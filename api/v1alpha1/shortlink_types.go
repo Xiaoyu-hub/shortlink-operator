@@ -132,6 +132,10 @@ type ShortlinkStatus struct {
 // +kubebuilder:resource:shortName=sl,categories=shortlink
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.readyReplicas`
+// Observed 暴露 status.observedGeneration，让「控制器是否已追上最新 spec」在 `kubectl get sl`
+// 的默认视图里就可见——否则 Ready=True 可能是很久以前那版 spec 的结论（见 status 的因果链说明）。
+// 判读方式：Observed 落后于 `kubectl get sl <name> -o jsonpath='{.metadata.generation}'` 即为未收敛。
+// +kubebuilder:printcolumn:name="Observed",type=integer,JSONPath=`.status.observedGeneration`
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type Shortlink struct {
