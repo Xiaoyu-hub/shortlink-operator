@@ -148,6 +148,8 @@ SUCCESS! -- 5 Passed | 0 Failed | 0 Pending | 0 Skipped
 
 ### 9.1 Day 6 待办清单（Day 5 复盘产出，按依赖排序）
 
+> 执行结果见 `docs/day06-failure-visibility-and-selfheal.md`（第 1、2 项已完成，第 3 项挪到 Day 7）。
+
 | # | 事项 | 来源 / 为什么现在做 |
 |---|------|---------------------|
 | 1 | **自愈专项用例**：删 Deployment → 自动重建 | 机制已具备（`Owns` + 先查后建），缺的是把它**固化成测试**。断言必须有「新对象 UID ≠ 旧 UID」，并同时验证 ownerReference 与 spec 一致 |

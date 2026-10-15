@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,10 +54,24 @@ const (
 	httpPortName  = "http"
 )
 
+// 事件 Reason：面向运维的「发生过什么动作」。与 status 条件的 Reason 分工不同——
+// 事件描述**动作**（Created/Updated/Scaled），条件描述**状态**（Ready/NotReady）。
+// 事件会随时间失效（默认 1 小时 TTL），条件才是长期可读的状态；两者互补，不能互相替代。
+const (
+	eventReasonCreated = "Created"
+	eventReasonUpdated = "Updated"
+	eventReasonScaled  = "Scaled"
+)
+
 // ShortlinkReconciler reconciles a Shortlink object
 type ShortlinkReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Recorder 写 Kubernetes Event（kubectl describe 里能看到的那部分）。
+	// 由 SetupWithManager 兜底注入：调用方没显式给时用 manager 的记录器，
+	// 这样 main.go、测试套件、以及将来任何构造路径都不需要各自记得注入。
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=shortlink.dev,resources=shortlinks,verbs=get;list;watch;update;patch
@@ -66,6 +81,7 @@ type ShortlinkReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services/status,verbs=get
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile 把集群中的 Deployment/Service 收敛到 Shortlink 声明的期望状态。
 //
@@ -76,6 +92,10 @@ type ShortlinkReconciler struct {
 //
 // paused=true 是排障冻结开关：跳过子资源调和，只刷新 status 的可观测量，
 // observedGeneration 停在冻结前版本——客户端看到 obsGen < gen 就知道「尚未收敛」。
+//
+// 调和失败（子资源 Create/Update 被拒等）不是"静默重试"：会写 Warning 事件 + Ready=False 条件
+// （见 reportFailure），并把原始错误往上抛给 workqueue 做指数退避。失败时**不推进**
+// observedGeneration——它代表「最新 spec 已被完整调和」，而这一轮并没有完成。
 func (r *ShortlinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 	log.Info("Reconciling Shortlink", "name", req.Name, "namespace", req.Namespace)
@@ -100,17 +120,21 @@ func (r *ShortlinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if err := r.reconcileDeployment(ctx, &cr); err != nil {
 		log.Error(err, "Failed to reconcile Deployment", "name", cr.Name, "namespace", cr.Namespace)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.reportFailure(ctx, &cr, shortlinkv1alpha1.ReasonDeploymentReconcileFailed, err)
 	}
 	if err := r.reconcileService(ctx, &cr); err != nil {
 		log.Error(err, "Failed to reconcile Service", "name", cr.Name, "namespace", cr.Namespace)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.reportFailure(ctx, &cr, shortlinkv1alpha1.ReasonServiceReconcileFailed, err)
 	}
 	return ctrl.Result{}, r.updateStatus(ctx, &cr, true)
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ShortlinkReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// 事件记录器兜底注入：没显式配就用 manager 的（见字段注释）。
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("shortlink")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		// For：主资源变化入队。加 GenerationChangedPredicate 只放行 spec 变化
 		// （generation 递增），滤掉 status-only 更新——我们自己写 status 会再次触发
@@ -138,10 +162,21 @@ func (r *ShortlinkReconciler) reconcileDeployment(ctx context.Context, cr *short
 	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &actual)
 	if err == nil {
 		if deploymentNeedsUpdate(&actual, desired) {
+			// 副本数变化单独记一条事件：排障时「谁在什么时候缩/扩容」一眼能看到。
+			if actual.Spec.Replicas != nil && desired.Spec.Replicas != nil &&
+				*actual.Spec.Replicas != *desired.Spec.Replicas {
+				r.Recorder.Eventf(cr, corev1.EventTypeNormal, eventReasonScaled,
+					"Scaling Deployment %s from %d to %d replicas",
+					actual.Name, *actual.Spec.Replicas, *desired.Spec.Replicas)
+			}
 			log.Info("Updating Deployment", "name", actual.Name, "namespace", actual.Namespace)
 			actual.Spec = desired.Spec
 			actual.Labels = desired.Labels
-			return r.Update(ctx, &actual)
+			if err := r.Update(ctx, &actual); err != nil {
+				return err
+			}
+			r.Recorder.Event(cr, corev1.EventTypeNormal, eventReasonUpdated, "Updated Deployment "+actual.Name)
+			return nil
 		}
 		return nil // 无偏移：零写入
 	}
@@ -150,11 +185,15 @@ func (r *ShortlinkReconciler) reconcileDeployment(ctx context.Context, cr *short
 	}
 
 	log.Info("Creating Deployment", "name", desired.Name, "namespace", desired.Namespace)
-	if err := r.Create(ctx, desired); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
+	if err := r.Create(ctx, desired); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		// AlreadyExists：并发窗口内别的 reconcile 先建好了；事件驱动的 Owns 会再触发一次，
+		// 下一次走 diff 分支统一收敛。这里直接返回即可。
+		return nil
 	}
-	// AlreadyExists：并发窗口内别的 reconcile 先建好了；事件驱动的 Owns 会再触发一次，
-	// 下一次走 diff 分支统一收敛。这里直接返回即可。
+	r.Recorder.Event(cr, corev1.EventTypeNormal, eventReasonCreated, "Created Deployment "+desired.Name)
 	return nil
 }
 
@@ -187,7 +226,11 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 			}
 			actual.Spec = desired.Spec
 			actual.Labels = desired.Labels
-			return r.Update(ctx, &actual)
+			if err := r.Update(ctx, &actual); err != nil {
+				return err
+			}
+			r.Recorder.Event(cr, corev1.EventTypeNormal, eventReasonUpdated, "Updated Service "+actual.Name)
+			return nil
 		}
 		return nil
 	}
@@ -196,9 +239,13 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 	}
 
 	log.Info("Creating Service", "name", desired.Name, "namespace", desired.Namespace)
-	if err := r.Create(ctx, desired); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
+	if err := r.Create(ctx, desired); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		return nil
 	}
+	r.Recorder.Event(cr, corev1.EventTypeNormal, eventReasonCreated, "Created Service "+desired.Name)
 	return nil
 }
 
@@ -211,61 +258,137 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 func (r *ShortlinkReconciler) updateStatus(ctx context.Context, cr *shortlinkv1alpha1.Shortlink, advanceGeneration bool) error {
 	log := log.FromContext(ctx)
 
-	readyReplicas, available := r.deploymentObservation(ctx, cr)
-	desired := desiredReplicas(cr)
+	st := r.observeDeployment(ctx, cr)
 
-	old := cr.DeepCopy()
-
-	cr.Status.ReadyReplicas = readyReplicas
-	cr.Status.URL = statusURL(cr)
-
-	if advanceGeneration {
-		cr.Status.ObservedGeneration = cr.Generation
-
-		cond := metav1.Condition{
-			Type:               shortlinkv1alpha1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             "ReplicasNotReady",
-			Message:            fmt.Sprintf("expected %d replicas, %d reported ready", desired, readyReplicas),
-			ObservedGeneration: cr.Generation,
+	changed, err := r.patchStatus(ctx, cr, func(s *shortlinkv1alpha1.ShortlinkStatus) {
+		// 可观测量：每次观测都刷新，无论这一轮成功与否。
+		s.ReadyReplicas = st.ready
+		s.URL = statusURL(cr)
+		if advanceGeneration {
+			// 结论：只有「最新 spec 这一轮被完整走完」才更新。
+			s.ObservedGeneration = cr.Generation
+			meta.SetStatusCondition(&s.Conditions, readyCondition(cr, desiredReplicas(cr), st))
 		}
-		if available && readyReplicas == desired {
-			cond.Status = metav1.ConditionTrue
-			cond.Reason = "ReplicasReady"
-			cond.Message = fmt.Sprintf("%d/%d replicas ready", readyReplicas, desired)
-		}
-		meta.SetStatusCondition(&cr.Status.Conditions, cond)
-	}
-
-	if equality.Semantic.DeepEqual(old.Status, cr.Status) {
-		return nil // 无变化不写：避免 status 写放大与自触发
-	}
-
-	if err := r.Status().Patch(ctx, cr, client.MergeFrom(old)); err != nil {
+	})
+	if err != nil || !changed {
 		return err
 	}
 	log.Info("Updated Shortlink status",
 		"name", cr.Name, "namespace", cr.Namespace,
-		"readyReplicas", readyReplicas, "observedGeneration", cr.Status.ObservedGeneration)
+		"readyReplicas", st.ready, "observedGeneration", cr.Status.ObservedGeneration)
 	return nil
 }
 
-// deploymentObservation 从 Deployment.status 读真实观测。
+// reportFailure 把「这一轮调和失败」变成外部可观测的两件事：Warning 事件 + Ready=False 条件。
+//
+// 两条刻意的设计：
+//  1. **不推进 status.observedGeneration**——它代表「最新 spec 已被完整调和」，而这一轮没有完成，
+//     推进它就等于谎报收敛（客户端见 obsGen < gen 才知道要等）。
+//  2. **条件自身的 ObservedGeneration 仍记当前 generation**——这条 False 说的正是当前这版 spec，
+//     两者语义不同，所以不能一起省略。
+//
+// 返回原始 cause（而不是写 status 时可能的错误），让 workqueue 按真正的失败原因退避重试；
+// status 写失败只记日志，避免它掩盖原始故障。
+func (r *ShortlinkReconciler) reportFailure(
+	ctx context.Context,
+	cr *shortlinkv1alpha1.Shortlink,
+	reason string,
+	cause error,
+) error {
+	r.Recorder.Event(cr, corev1.EventTypeWarning, reason, cause.Error())
+
+	st := r.observeDeployment(ctx, cr)
+	_, err := r.patchStatus(ctx, cr, func(s *shortlinkv1alpha1.ShortlinkStatus) {
+		s.ReadyReplicas = st.ready
+		s.URL = statusURL(cr)
+		meta.SetStatusCondition(&s.Conditions, metav1.Condition{
+			Type:               shortlinkv1alpha1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            cause.Error(),
+			ObservedGeneration: cr.Generation,
+		})
+	})
+	if err != nil {
+		log.FromContext(ctx).Error(err, "Failed to write failure status",
+			"name", cr.Name, "namespace", cr.Namespace)
+	}
+	return cause
+}
+
+// patchStatus 是 status 的唯一写出口：mutate 里只改该改的字段，无变化则一次 API 都不发。
+// 用 Status().Patch(MergeFrom(old)) 而非 Update：并发下别的副本改了 status 时，
+// merge patch 不要求 resourceVersion 一致，比 Update 撞 409 更宽容。
+func (r *ShortlinkReconciler) patchStatus(
+	ctx context.Context,
+	cr *shortlinkv1alpha1.Shortlink,
+	mutate func(*shortlinkv1alpha1.ShortlinkStatus),
+) (bool, error) {
+	old := cr.DeepCopy()
+	mutate(&cr.Status)
+	if equality.Semantic.DeepEqual(old.Status, cr.Status) {
+		return false, nil // 无变化不写：避免 status 写放大与自触发
+	}
+	if err := r.Status().Patch(ctx, cr, client.MergeFrom(old)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// deploymentState 是对子资源 Deployment 的一次观测快照。
+// found 与 available 分开，才能把「还没建出来」和「建出来了但不可用」报成不同的 Reason——
+// 折叠成一种的话，message 会自相矛盾（见 readyCondition）。
+type deploymentState struct {
+	found     bool
+	available bool
+	ready     int32
+}
+
+// observeDeployment 从 Deployment.status 读真实观测。
 // 数据源是 API Server（informer 缓存），绝不使用控制器本地计数——本地计数会在
 // 多副本 manager / 重启下漂移。
-func (r *ShortlinkReconciler) deploymentObservation(ctx context.Context, cr *shortlinkv1alpha1.Shortlink) (int32, bool) {
+//
+// 注意缓存是最终一致的：刚 Create 完的 Deployment 可能在这里短暂读到 NotFound，
+// 于是 status 会如实写出 DeploymentNotFound 而不是硬猜一个值——下一轮事件会把它纠正成真实观测。
+func (r *ShortlinkReconciler) observeDeployment(ctx context.Context, cr *shortlinkv1alpha1.Shortlink) deploymentState {
 	var deploy appsv1.Deployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(cr), &deploy); err != nil {
-		return 0, false // NotFound 或读失败都按「未就绪」处理；后续事件会再次触发收敛
+		return deploymentState{}
 	}
-	available := false
+	st := deploymentState{found: true, ready: deploy.Status.ReadyReplicas}
 	for _, c := range deploy.Status.Conditions {
 		if c.Type == appsv1.DeploymentAvailable && c.Status == corev1.ConditionTrue {
-			available = true
+			st.available = true
 			break
 		}
 	}
-	return deploy.Status.ReadyReplicas, available
+	return st
+}
+
+// readyCondition 把观测快照翻译成 Ready 条件。三种未就绪各有独立 Reason。
+func readyCondition(cr *shortlinkv1alpha1.Shortlink, desired int32, st deploymentState) metav1.Condition {
+	cond := metav1.Condition{
+		Type:               shortlinkv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: cr.Generation,
+	}
+	switch {
+	case !st.found:
+		cond.Reason = shortlinkv1alpha1.ReasonDeploymentNotFound
+		cond.Message = fmt.Sprintf("Deployment %s not found yet", cr.Name)
+	case st.ready != desired:
+		cond.Reason = shortlinkv1alpha1.ReasonReplicasNotReady
+		cond.Message = fmt.Sprintf("%d/%d replicas ready", st.ready, desired)
+	case !st.available:
+		// 副本数达标但 Deployment 还没 Available：仍在滚动，或进度超时。
+		cond.Reason = shortlinkv1alpha1.ReasonDeploymentNotAvailable
+		cond.Message = fmt.Sprintf("%d/%d replicas ready, but Deployment is not available yet", st.ready, desired)
+	default:
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = shortlinkv1alpha1.ReasonReplicasReady
+		cond.Message = fmt.Sprintf("%d/%d replicas ready", st.ready, desired)
+	}
+	return cond
 }
 
 // ---- 期望对象构造 ----

@@ -37,6 +37,29 @@ const (
 	ConditionReady = "Ready"
 )
 
+// Ready 条件的 Reason 取值。同样集中定义：Reason 是「机器可分类、可告警」的那一半信息，
+// 字符串散落各处时，监控规则和测试断言会随重构悄悄失配。
+//
+// 分档原则：**不同原因必须给不同 Reason**。曾经所有未就绪都写成 ReplicasNotReady，
+// 于是「副本数已达标但 Deployment 不可用」会输出一句自相矛盾的 message
+// （expected 1 replicas, 1 reported ready），排障时反而误导。
+const (
+	// ReasonReplicasReady → Ready=True：期望副本数已全部就绪且 Deployment 可用。
+	ReasonReplicasReady = "ReplicasReady"
+	// ReasonReplicasNotReady → Ready=False：就绪副本数与期望不符。
+	ReasonReplicasNotReady = "ReplicasNotReady"
+	// ReasonDeploymentNotAvailable → Ready=False：副本数已达标，但 Deployment 的 Available
+	// 条件还不为 True（仍在滚动、或进度超时 ProgressDeadlineExceeded）。
+	ReasonDeploymentNotAvailable = "DeploymentNotAvailable"
+	// ReasonDeploymentNotFound → Ready=False：子资源 Deployment 尚不存在。
+	// 首次创建后缓存未同步时可能短暂出现，下一轮事件会纠正。
+	ReasonDeploymentNotFound = "DeploymentNotFound"
+	// ReasonDeploymentReconcileFailed / ReasonServiceReconcileFailed → Ready=False：
+	// 调和子资源时出错，正由 workqueue 退避重试；此时 status.observedGeneration 不推进。
+	ReasonDeploymentReconcileFailed = "DeploymentReconcileFailed"
+	ReasonServiceReconcileFailed    = "ServiceReconcileFailed"
+)
+
 // ShortlinkSpec 描述短链服务的期望状态。
 // 注意：这里只放「用户想要什么」，不放「现在怎么样了」。
 type ShortlinkSpec struct {

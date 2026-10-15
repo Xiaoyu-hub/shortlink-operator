@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	shortlinkv1alpha1 "github.com/Xiaoyu-hub/shortlink-operator/api/v1alpha1"
 )
@@ -273,6 +274,104 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			}, timeout, interval).Should(BeTrue())
 		})
 	})
+
+	// 自愈不是新功能：Owns(Deployment) + 先查后建已经具备这个能力，
+	// 这一节把它固化成测试——没有测试的"已经能自愈"只是当场的观察。
+	Context("自愈", func() {
+		It("删掉 Deployment 后由控制循环重建（新 UID + ownerReference + spec 一致）", func() {
+			name := "selfheal"
+			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
+				s.Spec.Replicas = int32Ptr(1)
+			}))).To(Succeed())
+
+			var first appsv1.Deployment
+			Eventually(func() error {
+				return k8sClient.Get(ctx, objectKey(name), &first)
+			}, timeout, interval).Should(Succeed())
+			firstUID := first.UID
+			Expect(firstUID).NotTo(BeEmpty())
+
+			By("删掉 Deployment —— Delete 事件带着 ownerReference 反查，把 CR 重新入队")
+			Expect(k8sClient.Delete(ctx, &first)).To(Succeed())
+
+			// 只断言「对象还在」是不够的：那可能只是删除没生效。
+			// UID 变了才是"被重新创建"的证据。
+			Eventually(func() bool {
+				var d appsv1.Deployment
+				if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil {
+					return false
+				}
+				return d.UID != firstUID
+			}, timeout, interval).Should(BeTrue())
+
+			By("新对象必须仍由本 CR 所有，且 spec 收敛到期望（证明是控制循环干的，不是碰巧）")
+			var rebuilt appsv1.Deployment
+			Expect(k8sClient.Get(ctx, objectKey(name), &rebuilt)).To(Succeed())
+			Expect(rebuilt.GetOwnerReferences()).To(HaveLen(1))
+			Expect(rebuilt.GetOwnerReferences()[0].Kind).To(Equal("Shortlink"))
+			Expect(rebuilt.GetOwnerReferences()[0].Name).To(Equal(name))
+			Expect(rebuilt.GetOwnerReferences()[0].Controller).To(HaveValue(BeTrue()))
+			Expect(rebuilt.Spec.Selector.MatchLabels).To(HaveKeyWithValue(labelInstance, name))
+			Expect(rebuilt.Spec.Template.Spec.Containers[0].Image).
+				To(Equal("ghcr.io/xiaoyu-hub/shortlink:v0.1.0"))
+		})
+	})
+
+	// 失败路径的可观测性：调和失败不再是"静默退避重试"——外面必须能看见。
+	Context("调和失败的可观测性", func() {
+		It("子资源无法收敛时写 Warning 事件 + Ready=False 且不推进 observedGeneration；故障排除后自行恢复", func() {
+			name := "reconcile-failure"
+
+			By("预置一个同名 Deployment：template labels 与期望不同（会触发覆写）+ selector 不可变（覆写必被拒）")
+			// 为什么必须两个都改：
+			//   selector 不可变是我们要的失败源，但 deploymentNeedsUpdate 并不比较 selector，
+			//   所以还得让**被比较的**字段（template labels）也偏移，覆写才会真的发生；
+			//   覆写会把 selector 一起提交，于是被 API Server 以「selector 不可变」拒绝。
+			//   （selector 与 template labels 必须自洽，否则占位对象自己就建不出来。）
+			occupied := desiredDeploymentForTest(name)
+			occupied.Spec.Selector.MatchLabels = map[string]string{labelInstance: "someone-else"}
+			occupied.Spec.Template.ObjectMeta.Labels = map[string]string{labelInstance: "someone-else"}
+			Expect(k8sClient.Create(ctx, occupied)).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, newTestShortlink(name, nil))).To(Succeed())
+
+			By("Ready 条件的 Reason 必须点名「调和失败」，而不是笼统的未就绪")
+			Eventually(func() string {
+				return readyReason(name)
+			}, timeout, interval).Should(Equal(shortlinkv1alpha1.ReasonDeploymentReconcileFailed))
+
+			By("observedGeneration 必须停在原处：这一轮没有把最新 spec 走完")
+			Consistently(func() int64 {
+				obs, _ := shortlinkObservedGeneration(name)
+				return obs
+			}, 2*time.Second, interval).Should(Equal(int64(0)))
+
+			By("Warning 事件应出现（事件是异步写出的，必须 Eventually）")
+			Eventually(func() []string {
+				return eventTypesAndReasonsFor(name)
+			}, timeout, interval).Should(ContainElement("Warning/" + shortlinkv1alpha1.ReasonDeploymentReconcileFailed))
+
+			By("排除故障：删掉占着名字的对象，控制器应自行恢复并追平 generation")
+			var occupying appsv1.Deployment
+			Expect(k8sClient.Get(ctx, objectKey(name), &occupying)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &occupying)).To(Succeed())
+			Eventually(func() bool {
+				var d appsv1.Deployment
+				return apierrors.IsNotFound(k8sClient.Get(ctx, objectKey(name), &d))
+			}, timeout, interval).Should(BeTrue())
+
+			Eventually(func() bool {
+				obs, gen := shortlinkObservedGeneration(name)
+				return obs == gen && gen > 0
+			}, timeout, interval).Should(BeTrue())
+
+			// 失败原因被清除后，Reason 换成真正的未就绪原因（envtest 没有 kcm，
+			// 副本永远不会 ready，所以是 ReplicasNotReady 而不是调和失败）。
+			Eventually(func() string {
+				return readyReason(name)
+			}, timeout, interval).Should(Equal(shortlinkv1alpha1.ReasonReplicasNotReady))
+		})
+	})
 })
 
 // ---- 测试辅助 ----
@@ -323,4 +422,35 @@ func shortlinkObservedGeneration(name string) (observed, generation int64) {
 		return -1, -1
 	}
 	return s.Status.ObservedGeneration, s.Generation
+}
+
+// readyReason 读 CR 上 Ready 条件的 Reason；条件还不存在时返回空串。
+func readyReason(name string) string {
+	var s shortlinkv1alpha1.Shortlink
+	if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
+		return ""
+	}
+	for _, c := range s.Status.Conditions {
+		if c.Type == shortlinkv1alpha1.ConditionReady {
+			return c.Reason
+		}
+	}
+	return ""
+}
+
+// eventTypesAndReasonsFor 列出作用在该对象上的事件，形如 "Warning/DeploymentReconcileFailed"。
+// 用 legacy corev1.Event：mgr.GetEventRecorderFor 返回的是"旧版"记录器，
+// 落到 core/v1 的 Event（新版的 mgr.GetEventRecorder 才会写 events.k8s.io/v1）。
+func eventTypesAndReasonsFor(name string) []string {
+	var events corev1.EventList
+	if err := k8sClient.List(ctx, &events, client.InNamespace(testNamespace)); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(events.Items))
+	for _, e := range events.Items {
+		if e.InvolvedObject.Name == name {
+			out = append(out, e.Type+"/"+e.Reason)
+		}
+	}
+	return out
 }
