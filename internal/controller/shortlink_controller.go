@@ -23,8 +23,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -267,12 +267,17 @@ func (r *ShortlinkReconciler) deploymentObservation(ctx context.Context, cr *sho
 
 // ---- 期望对象构造 ----
 
-// 期望副本数：paused=true 时缩到 0（排障开关）；否则取 spec.replicas。
-// spec.replicas 理论上已被 API Server defaulting 补成 1，这里仍兜底，防御缓存未同步。
+// 期望副本数：取 spec.replicas；spec.replicas 为 nil 时兜底为 1。
+//
+// 这里**刻意不处理** paused：冻结的语义是「完全不干预子资源」（由 Reconcile 的 Paused
+// 分支提前 return 实现），不是「把副本缩到 0」。曾有过 `if cr.Spec.Paused { return 0 }`
+// 的分支，那是走不到的死代码——paused 时 Reconcile 根本不会调用本函数所在的构造链，
+// 留着只会误导读者以为冻结会缩容。
+//
+// nil 兜底也不是给生产路径用的：spec.replicas 带 +kubebuilder:default=1，从 API Server
+// 读回来的对象永远非 nil。真正会走到这里的是绕过 admission defaulting 的构造路径
+// （例如测试直接 new 出来的 CR）。
 func desiredReplicas(cr *shortlinkv1alpha1.Shortlink) int32 {
-	if cr.Spec.Paused {
-		return 0
-	}
 	if cr.Spec.Replicas != nil {
 		return *cr.Spec.Replicas
 	}

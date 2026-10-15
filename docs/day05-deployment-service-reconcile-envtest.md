@@ -45,13 +45,13 @@ Reconcile(req)
 | 字段 | 谁补的 | 整体比较的后果 |
 |------|--------|----------------|
 | `ImagePullPolicy`、`TerminationMessagePath`、`Protocol=TCP` | API Server defaulting | desired 为空 vs actual 有值 → 恒不等 |
-| Service `ClusterIP` / `ClusterIPs` / `IPFamily` | API Server 分配 | desired 为空 → 恒不等，且 Update 会把 IP 冲掉 |
+| Service `ClusterIP` / `ClusterIPs` / `IPFamily` | API Server 分配 | desired 为空 → 恒不等（**注意：Update 并不会把分配值冲掉**，见第十节实测） |
 | Service/NodePort 的 `nodePort` | API Server 分配 | 同上 |
 
 正确姿势（本实现）：**只比较自己声明并负责收敛的字段子集**——Deployment 比
 labels/replicas/template labels/容器 Name·Image·Env·Resources·Ports；Service 比
 labels/Type/Selector/Ports(Name·Port·TargetPort·Protocol)。更新时把 ClusterIP/NodePort 先从
-actual 搬回 desired 再整体覆盖，避免冲掉分配值。
+actual 搬回 desired 再整体覆盖，显式声明「这几个值归 API Server 所有、本控制器不持有」。
 
 ## 四、status 写回与因果链
 
@@ -145,3 +145,86 @@ SUCCESS! -- 5 Passed | 0 Failed | 0 Pending | 0 Skipped
 - Day 5 面试题 5 问待作答（见聊天）；答对进 Day 6：自愈专项用例（删 Deployment 自动重建已有机制，
   补为正式测试）+ 事件记录 + 滚动策略字段（maxUnavailable/maxSurge）。
 - `make test` 在本机仍会卡在 setup-envtest（DNS 劫持），已在第二节备注绕过路径；CI（Linux）无此问题。
+
+## 十、勘误（2026-10-15 用真 kube-apiserver 实测修正）
+
+第三节原先断言「Update 会把 IP 冲掉」——那是**推理，不是实测**。实测**不成立**，本文档按实测改写。
+
+### 10.1 默认值 vs 分配值：先把字段清单拉出来
+
+实测环境：envtest 内的真 kube-apiserver（`--service-cluster-ip-range=10.0.0.0/24`）。
+提交一个最小 Deployment（容器只有 `name`/`image`/`resources`）与最小 Service（只有 `selector` + 一个
+`port`），再 Get 回来对比：
+
+| 对象 | 我提交的 | API Server 存下来多出的字段 |
+|------|----------|------------------------------|
+| Deployment | 容器 3 字段 | 容器多 `imagePullPolicy`、`terminationMessagePath`、`terminationMessagePolicy`；Pod 层多 `dnsPolicy`、`restartPolicy`、`schedulerName`、`securityContext`、`terminationGracePeriodSeconds`；spec 层多 `replicas: 1`、`revisionHistoryLimit: 10`、`progressDeadlineSeconds: 600`、`strategy{type: RollingUpdate, maxSurge/maxUnavailable: 25%}` |
+| Service | spec 2 字段、port 2 字段 | `type: ClusterIP`、`protocol: TCP`、`sessionAffinity: None`、`internalTrafficPolicy: Cluster`、`ipFamilies: [IPv4]`、`ipFamilyPolicy: SingleStack`、`clusterIP: 10.0.0.x`、`clusterIPs: [10.0.0.x]` |
+
+**分类判据**（比记「默认值 / 分配值」两个名词更管用）：
+
+- **默认值**：只依赖该对象自身，任何客户端都能算出同一结果 → **可被覆盖**（desired 里显式写
+  `protocol: TCP` 完全合法）。
+- **分配值**：依赖**整个集群的全局状态**（唯一性由集群统一发放）→ 由 API Server 分配、全局唯一：
+  `clusterIP`/`clusterIPs`/`ipFamilies`、NodePort 的 `nodePort`。
+
+### 10.2 分配值的真实危险：不是「被冲掉」，是「被搬到别的对象上」
+
+| 实验 | 操作 | 实测结果 |
+|------|------|----------|
+| a | Update 时把 `clusterIP` 清空（`""` + `clusterIPs: nil`） | **成功，旧值被保留**（`10.0.0.73` 原样）；即本实现那三行搬运即便删掉也不会出事 |
+| a-2 | Update 时把 `clusterIP` 改成另一个具体值 | **拒绝**：`spec.clusterIPs[0]: Invalid value: [...]: may not change once set` |
+| b | NodePort 服务把 `nodePort` 清成 0 再 Update | **成功，旧值被保留**（31888 不变）；对照：全新创建的服务拿到的是另一个值（32291），说明分配器不保证给同值 |
+| c | 把已有 Service `DeepCopy` 改名后 Create | **拒绝**：`spec.clusterIPs: Invalid value: [...]: provided IP is already allocated` |
+
+结论改写：
+
+1. **空值 = 修复语义**（API Server 保住旧值）；**显式改值 = 不可变拒绝**。两者是完全不同的路径。
+2. 分配值真正会咬人的场景是**对象复用**：把已经被 API Server 加工过（因而携带分配值）的对象
+   再拿去 Create、改名 Create、或跨 reconcile 缓存复用 → 撞 `may not change once set` /
+   `already allocated`，且**失败原因不易一眼看出**。
+3. 因此 `desiredService(cr)`「每次从 CR 重建新对象」不只是纯函数洁癖，而是**正确性的必要条件**：
+   新建对象天然不携带上一次的分配值。反过来，`reconcileService` 里搬运 ClusterIP 的三行属于
+   **冗余但显式**（声明「这几个值归 API Server，本控制器不持有」），**不是防事故的必需品**。
+
+### 10.3 冻结语义勘误（paused）
+
+`desiredReplicas` 原有 `if cr.Spec.Paused { return 0 }`，注释写「paused=true 时缩到 0」。这与实际行为
+矛盾，且是**死代码**：`Reconcile` 在 `Paused` 时提前 return
+（`internal/controller/shortlink_controller.go:94`），`reconcileDeployment` → `desiredDeployment`
+根本不会被调用；`updateStatus` 里算出的 `desired` 只在 `advanceGeneration == true` 时使用，而 paused
+路径传的是 `false`。三条调用路径都不经过它。
+
+实际语义 = **冻结即完全不干预**（与 k8s `Deployment.spec.paused`「停止推进、维持现状」一致）：
+副本保持冻结前的值，**不缩容**。已删除该死分支并改写注释。
+
+### 10.4 幂等的可观测判据要改写（「resourceVersion 不变」证明不了什么）
+
+第二节写了「连续 reconcile 不改变任何 resourceVersion」，ROADMAP Day 8 的自检也写着「连续触发 10 次
+reconcile，resourceVersion 不变」。实测发现这个判据**几乎测不出错误**：
+
+| 实验 | 操作 | resourceVersion |
+|------|------|-----------------|
+| 4a | Update，内容与已存对象一字不差 | **不变** |
+| 4b | 空 merge patch | **不变** |
+| 5 | 模拟「把 nodePort 纳入判据」的控制器：连续 3 轮都想把 `nodePort` 写成 0（API Server 每轮都把旧值保留回来） | **3 轮全不变** |
+| 6（对照） | 真的加了一个 label | **变**（221 → 225，确认探针本身没问题） |
+
+结论：**当一次写请求的净效果与已存对象一致时，API Server 不落盘、不 bump resourceVersion、也不产生
+watch 事件**（修复语义发生在比对之前）。于是：
+
+1. 一个「判据恒 true、每次调和都发 Update」的坏控制器，只要它的期望与现实的差异**全部落在 API Server
+   会自己修复/补全的字段上**，就**不会**产生存储写放大，也**不会**自触发成热循环——但每次调和都白白多一次
+   API 往返，而且日志每轮都喊「Updated Deployment」，**排障时会骗人**。
+2. 真正的写循环需要**持久化的真实差异**：mutating webhook 持续注入、另一个写者持续改同一字段（HPA 改
+   `replicas`、你改回去）、或者你写了非幂等的值（时间戳、无去重的 append）。此时写会落地 → 产生事件 →
+   再调和 → 再写。
+3. 因此「零写入」这条幂等主张**不能靠 resourceVersion 验证**，必须**数 API 请求**（包一层计数
+   RoundTripper，或看 `rest_client_requests_total`）。这是 Day 6 测试的改进项。
+4. 附带结论：读到 RV 从来没变，**不能**推断「我的 needsUpdate 判据是对的」。
+
+> 本节机制层面的定位（no-op 写在 apiserver 的哪一层被 dedupe 掉）未做源码级确认，只做了行为实测；
+> 实测版本为 envtest 内的 k8s 1.37，属版本相关行为，跨版本需复验。
+>
+> 本次实测用的探针脚本在 `hack/defaulting-probe/`（本机未纳入版本管理：尚未过 golangci-lint，
+> 待改写成 lint-clean 后再固化进仓库）。
