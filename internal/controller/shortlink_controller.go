@@ -171,8 +171,11 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 	if err == nil {
 		if serviceNeedsUpdate(&actual, desired) {
 			log.Info("Updating Service", "name", actual.Name, "namespace", actual.Namespace)
-			// ClusterIP / ClusterIPs / IPFamily / NodePort 由 API Server 分配且大多是
-			// 不可变字段：先把真实值搬回期望对象，再整体覆盖，避免把分配结果冲掉。
+			// ClusterIP / ClusterIPs / IPFamily / NodePort 是 API Server 分配的值（全局唯一、
+			// 由集群统一发放），本控制器不持有。这里把真实值搬回期望对象，是显式声明
+			// 「这几个字段的作者是 API Server」，而不是防事故的必需品——实测（见
+			// docs/day05 第十节）：即使不搬、传空值，API Server 也会保留旧值；
+			// 真正的雷是把带过分配值的对象复用到别的对象上（Create / 改名 / 重建）。
 			desired.Spec.ClusterIP = actual.Spec.ClusterIP
 			desired.Spec.ClusterIPs = actual.Spec.ClusterIPs
 			desired.Spec.IPFamilies = actual.Spec.IPFamilies
