@@ -174,7 +174,7 @@ ok  .../warmup  ok  .../warmup/cmd
 
 | # | 事项 | 说明 |
 |---|------|------|
-| 1 | **selector 在写入集合里、不在比较集合里** | `deploymentNeedsUpdate` 不比较 `Spec.Selector`，但 `actual.Spec = desired.Spec` 会写它。后果：别人改了 selector，控制器不会主动纠正；只有别的字段触发覆写时才"顺带"改它——而那时会被不可变约束拒绝（正是 5.2 用例的场景）。**这是 day02 说的"裂缝 1"的一个具体实例**，Day 7 可考虑把 selector 纳入比较或至少纳入告警 |
+| 1 | **selector 在写入集合里、不在比较集合里** | `deploymentNeedsUpdate` 不比较 `Spec.Selector`，但覆写分支会写它。这是 day02"裂缝 1"的具体实例。**两种后果都存在，取决于外来的 selector 改动是否仍匹配 template labels**：<br>① 改了 `instance` 值、或加了 template labels 里不存在的键 → API Server 直接拒绝（selector 必须匹配 template labels），或必须连带改 template labels → 而 template labels **在**比较集合里 → 控制器发现偏移 → 覆写 → 被 selector 不可变拒绝 → **响亮失败**（5.2 用例的场景）；<br>② 把 selector 收窄、或加一个 template labels 里**已有**的键 → 对象合法、template labels 未变、控制器不比较 selector → **静默且持久**的偏离，且 selector 不可变，永远修不回来。<br>**注意修法不是"把 selector 加进比较集合"**——那会把①的"一次性报错"变成**每次调和都报错**（无限退避 + Ready 常驻 False），把局部瑕疵升级成对象级故障。正确方向是**报告而非修复**：检测到不可变字段与期望不符时，只写 Warning 事件 + 专门 Reason，不尝试写回 |
 | 2 | 失败不重试的分类 | 目前所有 err 都退避重试；终态错误（如 5.2 的不可变冲突）会无限重试。Day 7+ 可加"终态错误"识别 |
 | 3 | 滚动策略 + readinessProbe | 挪到 Day 7（probe 需真集群才看得出效果）；注意 `needsUpdate` 的比较集合要同步扩 |
 | 4 | 零写入测试 | 待做：计数 `RoundTripper`（见 day05 第十节 10.4） |
