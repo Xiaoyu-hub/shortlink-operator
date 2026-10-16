@@ -9,6 +9,13 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
+# 本地 replace 的目标必须在 `go mod download` **之前**就位。
+# go.mod 里有：replace sigs.k8s.io/controller-runtime => ./third_party/controller-runtime
+# 而此时的 /workspace 里只有 go.mod/go.sum（COPY . . 还在后面），Go 会报：
+#   reading third_party/controller-runtime/go.mod: no such file or directory
+# 所以单独先拷一层 third_party/（只有 Go 源码 + 嵌套 go.mod，见 .dockerignore 的放行规则）。
+# 它变化频率远低于业务代码，对依赖缓存层的影响很小。
+COPY third_party/ third_party/
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
