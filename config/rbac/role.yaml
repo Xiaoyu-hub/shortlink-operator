@@ -7,13 +7,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - events
-  verbs:
-  - create
-  - patch
-- apiGroups:
-  - ""
-  resources:
   - services
   verbs:
   - create
@@ -47,6 +40,13 @@ rules:
   - deployments/status
   verbs:
   - get
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
 - apiGroups:
   - shortlink.dev
   resources:

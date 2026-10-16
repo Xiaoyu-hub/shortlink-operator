@@ -29,13 +29,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 
 	shortlinkv1alpha1 "github.com/Xiaoyu-hub/shortlink-operator/api/v1alpha1"
 )
@@ -61,6 +61,13 @@ const (
 	eventReasonCreated = "Created"
 	eventReasonUpdated = "Updated"
 	eventReasonScaled  = "Scaled"
+
+	// events.k8s.io/v1 的 Event 除了 reason 还有 action 字段：reason 说"结果是什么"，
+	// action 说"控制器尝试做了什么"。两者刻意分开，便于按动作聚合/告警。
+	eventActionCreate    = "Create"
+	eventActionUpdate    = "Update"
+	eventActionScale     = "Scale"
+	eventActionReconcile = "Reconcile"
 )
 
 // ShortlinkReconciler reconciles a Shortlink object
@@ -71,7 +78,11 @@ type ShortlinkReconciler struct {
 	// Recorder 写 Kubernetes Event（kubectl describe 里能看到的那部分）。
 	// 由 SetupWithManager 兜底注入：调用方没显式给时用 manager 的记录器，
 	// 这样 main.go、测试套件、以及将来任何构造路径都不需要各自记得注入。
-	Recorder record.EventRecorder
+	//
+	// 这里用的是 **events.k8s.io/v1** 的新事件 API（`mgr.GetEventRecorder`）；
+	// 旧版 `GetEventRecorderFor` 写 core/v1 Event 且已被标记 deprecated——staticcheck 会报，
+	// 迁过来顺带把 RBAC 的组也换成了 events.k8s.io（见下方 marker）。
+	Recorder recorder.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=shortlink.dev,resources=shortlinks,verbs=get;list;watch;update;patch
@@ -81,7 +92,7 @@ type ShortlinkReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services/status,verbs=get
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile 把集群中的 Deployment/Service 收敛到 Shortlink 声明的期望状态。
 //
@@ -97,14 +108,14 @@ type ShortlinkReconciler struct {
 // （见 reportFailure），并把原始错误往上抛给 workqueue 做指数退避。失败时**不推进**
 // observedGeneration——它代表「最新 spec 已被完整调和」，而这一轮并没有完成。
 func (r *ShortlinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Reconciling Shortlink", "name", req.Name, "namespace", req.Namespace)
+	logger := log.FromContext(ctx)
+	logger.Info("Reconciling Shortlink", "name", req.Name, "namespace", req.Namespace)
 
 	var cr shortlinkv1alpha1.Shortlink
 	if err := r.Get(ctx, req.NamespacedName, &cr); err != nil {
 		if apierrors.IsNotFound(err) {
 			// 对象已删除：子资源由 ownerReference 级联回收，控制器无事可做。
-			log.Info("Shortlink not found; children are owned and will be garbage-collected",
+			logger.Info("Shortlink not found; children are owned and will be garbage-collected",
 				"name", req.Name, "namespace", req.Namespace)
 			return ctrl.Result{}, nil
 		}
@@ -114,16 +125,16 @@ func (r *ShortlinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if cr.Spec.Paused {
 		// 冻结：不再推进底层资源，status 也只刷新可观测量（readyReplicas/url），
 		// conditions/observedGeneration 保持冻结前快照，避免谎报「已收敛最新 spec」。
-		log.Info("Shortlink paused; skipping child reconciliation", "name", cr.Name, "namespace", cr.Namespace)
+		logger.Info("Shortlink paused; skipping child reconciliation", "name", cr.Name, "namespace", cr.Namespace)
 		return ctrl.Result{}, r.updateStatus(ctx, &cr, false)
 	}
 
 	if err := r.reconcileDeployment(ctx, &cr); err != nil {
-		log.Error(err, "Failed to reconcile Deployment", "name", cr.Name, "namespace", cr.Namespace)
+		logger.Error(err, "Failed to reconcile Deployment", "name", cr.Name, "namespace", cr.Namespace)
 		return ctrl.Result{}, r.reportFailure(ctx, &cr, shortlinkv1alpha1.ReasonDeploymentReconcileFailed, err)
 	}
 	if err := r.reconcileService(ctx, &cr); err != nil {
-		log.Error(err, "Failed to reconcile Service", "name", cr.Name, "namespace", cr.Namespace)
+		logger.Error(err, "Failed to reconcile Service", "name", cr.Name, "namespace", cr.Namespace)
 		return ctrl.Result{}, r.reportFailure(ctx, &cr, shortlinkv1alpha1.ReasonServiceReconcileFailed, err)
 	}
 	return ctrl.Result{}, r.updateStatus(ctx, &cr, true)
@@ -133,7 +144,7 @@ func (r *ShortlinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *ShortlinkReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// 事件记录器兜底注入：没显式配就用 manager 的（见字段注释）。
 	if r.Recorder == nil {
-		r.Recorder = mgr.GetEventRecorderFor("shortlink")
+		r.Recorder = mgr.GetEventRecorder("shortlink")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		// For：主资源变化入队。加 GenerationChangedPredicate 只放行 spec 变化
@@ -151,7 +162,7 @@ func (r *ShortlinkReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // ---- 调和子资源 ----
 
 func (r *ShortlinkReconciler) reconcileDeployment(ctx context.Context, cr *shortlinkv1alpha1.Shortlink) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	desired := desiredDeployment(cr)
 	if err := controllerutil.SetControllerReference(cr, desired, r.Scheme); err != nil {
@@ -165,17 +176,18 @@ func (r *ShortlinkReconciler) reconcileDeployment(ctx context.Context, cr *short
 			// 副本数变化单独记一条事件：排障时「谁在什么时候缩/扩容」一眼能看到。
 			if actual.Spec.Replicas != nil && desired.Spec.Replicas != nil &&
 				*actual.Spec.Replicas != *desired.Spec.Replicas {
-				r.Recorder.Eventf(cr, corev1.EventTypeNormal, eventReasonScaled,
+				r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, eventReasonScaled, eventActionScale,
 					"Scaling Deployment %s from %d to %d replicas",
 					actual.Name, *actual.Spec.Replicas, *desired.Spec.Replicas)
 			}
-			log.Info("Updating Deployment", "name", actual.Name, "namespace", actual.Namespace)
+			logger.Info("Updating Deployment", "name", actual.Name, "namespace", actual.Namespace)
 			actual.Spec = desired.Spec
 			actual.Labels = desired.Labels
 			if err := r.Update(ctx, &actual); err != nil {
 				return err
 			}
-			r.Recorder.Event(cr, corev1.EventTypeNormal, eventReasonUpdated, "Updated Deployment "+actual.Name)
+			r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, eventReasonUpdated, eventActionUpdate,
+				"Updated Deployment %s", actual.Name)
 			return nil
 		}
 		return nil // 无偏移：零写入
@@ -184,7 +196,7 @@ func (r *ShortlinkReconciler) reconcileDeployment(ctx context.Context, cr *short
 		return err
 	}
 
-	log.Info("Creating Deployment", "name", desired.Name, "namespace", desired.Namespace)
+	logger.Info("Creating Deployment", "name", desired.Name, "namespace", desired.Namespace)
 	if err := r.Create(ctx, desired); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return err
@@ -193,12 +205,13 @@ func (r *ShortlinkReconciler) reconcileDeployment(ctx context.Context, cr *short
 		// 下一次走 diff 分支统一收敛。这里直接返回即可。
 		return nil
 	}
-	r.Recorder.Event(cr, corev1.EventTypeNormal, eventReasonCreated, "Created Deployment "+desired.Name)
+	r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, eventReasonCreated, eventActionCreate,
+		"Created Deployment %s", desired.Name)
 	return nil
 }
 
 func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlinkv1alpha1.Shortlink) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	desired := desiredService(cr)
 	if err := controllerutil.SetControllerReference(cr, desired, r.Scheme); err != nil {
@@ -209,7 +222,7 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &actual)
 	if err == nil {
 		if serviceNeedsUpdate(&actual, desired) {
-			log.Info("Updating Service", "name", actual.Name, "namespace", actual.Namespace)
+			logger.Info("Updating Service", "name", actual.Name, "namespace", actual.Namespace)
 			// ClusterIP / ClusterIPs / IPFamily / NodePort 是 API Server 分配的值（全局唯一、
 			// 由集群统一发放），本控制器不持有。这里把真实值搬回期望对象，是显式声明
 			// 「这几个字段的作者是 API Server」，而不是防事故的必需品——实测（见
@@ -229,7 +242,8 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 			if err := r.Update(ctx, &actual); err != nil {
 				return err
 			}
-			r.Recorder.Event(cr, corev1.EventTypeNormal, eventReasonUpdated, "Updated Service "+actual.Name)
+			r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, eventReasonUpdated, eventActionUpdate,
+				"Updated Service %s", actual.Name)
 			return nil
 		}
 		return nil
@@ -238,14 +252,15 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 		return err
 	}
 
-	log.Info("Creating Service", "name", desired.Name, "namespace", desired.Namespace)
+	logger.Info("Creating Service", "name", desired.Name, "namespace", desired.Namespace)
 	if err := r.Create(ctx, desired); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return err
 		}
 		return nil
 	}
-	r.Recorder.Event(cr, corev1.EventTypeNormal, eventReasonCreated, "Created Service "+desired.Name)
+	r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, eventReasonCreated, eventActionCreate,
+		"Created Service %s", desired.Name)
 	return nil
 }
 
@@ -256,7 +271,7 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 // 冻结（paused）时只刷新 readyReplicas / url——那条因果链代表「最新 spec 已被调和」，
 // 冻结状态下我们刻意没有调和，所以不推进它。
 func (r *ShortlinkReconciler) updateStatus(ctx context.Context, cr *shortlinkv1alpha1.Shortlink, advanceGeneration bool) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	st := r.observeDeployment(ctx, cr)
 
@@ -273,7 +288,7 @@ func (r *ShortlinkReconciler) updateStatus(ctx context.Context, cr *shortlinkv1a
 	if err != nil || !changed {
 		return err
 	}
-	log.Info("Updated Shortlink status",
+	logger.Info("Updated Shortlink status",
 		"name", cr.Name, "namespace", cr.Namespace,
 		"readyReplicas", st.ready, "observedGeneration", cr.Status.ObservedGeneration)
 	return nil
@@ -295,7 +310,7 @@ func (r *ShortlinkReconciler) reportFailure(
 	reason string,
 	cause error,
 ) error {
-	r.Recorder.Event(cr, corev1.EventTypeWarning, reason, cause.Error())
+	r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, reason, eventActionReconcile, "%s", cause.Error())
 
 	st := r.observeDeployment(ctx, cr)
 	_, err := r.patchStatus(ctx, cr, func(s *shortlinkv1alpha1.ShortlinkStatus) {

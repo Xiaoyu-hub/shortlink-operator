@@ -123,7 +123,8 @@ func TestUnknownKindIsRejected(t *testing.T) {
 
 func TestCountReadsRequestedKind(t *testing.T) {
 	// 先给 sharded 打一点量，确认 /count 读的确实是它。
-	if code, body := do(t, "/inc?kind=sharded&workers=2&perWorker=5"); code != http.StatusOK || !strings.Contains(body, "✅") {
+	if code, body := do(t, "/inc?kind=sharded&workers=2&perWorker=5"); code != http.StatusOK ||
+		!strings.Contains(body, "✅") {
 		t.Fatalf("预置增量失败：status=%d body=%q", code, body)
 	}
 

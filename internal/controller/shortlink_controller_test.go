@@ -25,6 +25,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -42,6 +43,10 @@ const (
 	interval = 200 * time.Millisecond
 
 	testNamespace = "shortlink-test"
+
+	// 测试里反复出现的镜像与"升级后"的镜像，提成常量（goconst）。
+	defaultImage  = "ghcr.io/xiaoyu-hub/shortlink:v0.1.0"
+	upgradedImage = "ghcr.io/xiaoyu-hub/shortlink:v0.2.0"
 )
 
 var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
@@ -57,7 +62,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 		It("创建 CR 后自动调和出 Deployment 与 Service（ownerRef/标签/端口/环境变量齐全）", func() {
 			name := "create-basic"
 			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
-				s.Spec.Replicas = int32Ptr(2)
+				s.Spec.Replicas = new(int32(2))
 				s.Spec.Env = []corev1.EnvVar{{Name: "SHORTLINK_LOG_LEVEL", Value: "info"}}
 			}))).To(Succeed())
 
@@ -78,7 +83,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			// 期望的容器规格
 			containers := deploy.Spec.Template.Spec.Containers
 			Expect(containers).To(HaveLen(1))
-			Expect(containers[0].Image).To(Equal("ghcr.io/xiaoyu-hub/shortlink:v0.1.0"))
+			Expect(containers[0].Image).To(Equal(defaultImage))
 			Expect(*deploy.Spec.Replicas).To(Equal(int32(2)))
 			Expect(containers[0].Ports).To(HaveLen(1))
 			Expect(containers[0].Ports[0].ContainerPort).To(Equal(int32(8080)))
@@ -101,7 +106,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			By("验证同名牌不会产生重复资源")
 			dup := desiredDeploymentForTest(name)
 			err := k8sClient.Create(ctx, dup)
-			fmt.Fprintf(GinkgoWriter, "duplicate create err: %v\n", err)
+			_, _ = fmt.Fprintf(GinkgoWriter, "duplicate create err: %v\n", err)
 			Expect(err).To(HaveOccurred()) // AlreadyExists 而非重复创建
 			Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
 		})
@@ -109,7 +114,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 		It("replicas=0 表示缩容到零：Deployment 副本数为 0（资源保留、Pod 清零）", func() {
 			name := "scale-to-zero"
 			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
-				s.Spec.Replicas = int32Ptr(0)
+				s.Spec.Replicas = new(int32(0))
 			}))).To(Succeed())
 
 			Eventually(func() int32 {
@@ -126,7 +131,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 		It("伪造 Deployment 就绪后，status 回写 readyReplicas / observedGeneration / Ready 条件", func() {
 			name := "ready-status"
 			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
-				s.Spec.Replicas = int32Ptr(1)
+				s.Spec.Replicas = new(int32(1))
 			}))).To(Succeed())
 
 			var deploy appsv1.Deployment
@@ -185,7 +190,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			// 第一版 spec 收敛
 			Eventually(func() string {
 				return deploymentImage(name)
-			}, timeout, interval).Should(Equal("ghcr.io/xiaoyu-hub/shortlink:v0.1.0"))
+			}, timeout, interval).Should(Equal(defaultImage))
 
 			By("改镜像 → metadata.generation 递增，控制器必须追平")
 			Eventually(func() error {
@@ -193,13 +198,13 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 				if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
 					return err
 				}
-				s.Spec.Image = "ghcr.io/xiaoyu-hub/shortlink:v0.2.0"
+				s.Spec.Image = upgradedImage
 				return k8sClient.Update(ctx, &s)
 			}, timeout, interval).Should(Succeed())
 
 			Eventually(func() string {
 				return deploymentImage(name)
-			}, timeout, interval).Should(Equal("ghcr.io/xiaoyu-hub/shortlink:v0.2.0"))
+			}, timeout, interval).Should(Equal(upgradedImage))
 
 			// 因果链：obsGen == gen == 2（第二版 spec，则是「已收敛」）
 			Eventually(func() bool {
@@ -213,13 +218,13 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 		It("paused=true 冻结子资源调和，恢复后自动补齐差额（observedGeneration 是未收敛旗帜）", func() {
 			name := "pause-freeze"
 			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
-				s.Spec.Replicas = int32Ptr(2)
+				s.Spec.Replicas = new(int32(2))
 			}))).To(Succeed())
 
 			// 第一版收敛
 			Eventually(func() string {
 				return deploymentImage(name)
-			}, timeout, interval).Should(Equal("ghcr.io/xiaoyu-hub/shortlink:v0.1.0"))
+			}, timeout, interval).Should(Equal(defaultImage))
 			Eventually(func() bool {
 				obs, gen := shortlinkObservedGeneration(name)
 				return obs == gen
@@ -241,13 +246,13 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 				if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
 					return err
 				}
-				s.Spec.Image = "ghcr.io/xiaoyu-hub/shortlink:v0.2.0"
+				s.Spec.Image = upgradedImage
 				return k8sClient.Update(ctx, &s)
 			}, timeout, interval).Should(Succeed())
 
 			Consistently(func() string {
 				return deploymentImage(name)
-			}, 2*time.Second, interval).Should(Equal("ghcr.io/xiaoyu-hub/shortlink:v0.1.0"))
+			}, 2*time.Second, interval).Should(Equal(defaultImage))
 
 			// observedGeneration 停在冻结前的 1，不再追 generation（=3）——
 			// 这正是「未收敛」的旗帜：客户端见 obsGen < gen 就不会误信旧 status。
@@ -268,7 +273,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 
 			Eventually(func() string {
 				return deploymentImage(name)
-			}, timeout, interval).Should(Equal("ghcr.io/xiaoyu-hub/shortlink:v0.2.0"))
+			}, timeout, interval).Should(Equal(upgradedImage))
 			Eventually(func() bool {
 				obs, gen := shortlinkObservedGeneration(name)
 				return obs == gen
@@ -282,7 +287,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 		It("删掉 Deployment 后由控制循环重建（新 UID + ownerReference + spec 一致）", func() {
 			name := "selfheal"
 			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
-				s.Spec.Replicas = int32Ptr(1)
+				s.Spec.Replicas = new(int32(1))
 			}))).To(Succeed())
 
 			var first appsv1.Deployment
@@ -314,7 +319,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			Expect(rebuilt.GetOwnerReferences()[0].Controller).To(HaveValue(BeTrue()))
 			Expect(rebuilt.Spec.Selector.MatchLabels).To(HaveKeyWithValue(labelInstance, name))
 			Expect(rebuilt.Spec.Template.Spec.Containers[0].Image).
-				To(Equal("ghcr.io/xiaoyu-hub/shortlink:v0.1.0"))
+				To(Equal(defaultImage))
 		})
 	})
 
@@ -331,7 +336,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			//   （selector 与 template labels 必须自洽，否则占位对象自己就建不出来。）
 			occupied := desiredDeploymentForTest(name)
 			occupied.Spec.Selector.MatchLabels = map[string]string{labelInstance: "someone-else"}
-			occupied.Spec.Template.ObjectMeta.Labels = map[string]string{labelInstance: "someone-else"}
+			occupied.Spec.Template.Labels = map[string]string{labelInstance: "someone-else"}
 			Expect(k8sClient.Create(ctx, occupied)).To(Succeed())
 
 			Expect(k8sClient.Create(ctx, newTestShortlink(name, nil))).To(Succeed())
@@ -405,7 +410,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 				if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
 					return err
 				}
-				s.Spec.Image = "ghcr.io/xiaoyu-hub/shortlink:v0.2.0"
+				s.Spec.Image = upgradedImage
 				return k8sClient.Update(ctx, &s)
 			}, timeout, interval).Should(Succeed())
 
@@ -441,7 +446,7 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 				if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
 					return err
 				}
-				s.Spec.Image = "ghcr.io/xiaoyu-hub/shortlink:v0.2.0"
+				s.Spec.Image = upgradedImage
 				return k8sClient.Update(ctx, &s)
 			}, timeout, interval).Should(Succeed())
 
@@ -514,8 +519,6 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 
 // ---- 测试辅助 ----
 
-func int32Ptr(v int32) *int32 { return &v }
-
 func objectKey(name string) types.NamespacedName {
 	return types.NamespacedName{Namespace: testNamespace, Name: name}
 }
@@ -525,7 +528,7 @@ func newTestShortlink(name string, mutate func(*shortlinkv1alpha1.Shortlink)) *s
 	sl := &shortlinkv1alpha1.Shortlink{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 		Spec: shortlinkv1alpha1.ShortlinkSpec{
-			Image: "ghcr.io/xiaoyu-hub/shortlink:v0.1.0",
+			Image: defaultImage,
 			// 显式给出 admission defaulting 后的值：真实 CR 的 spec.port 也会被 API Server 补成 8080
 			Port: 8080,
 		},
@@ -607,16 +610,16 @@ func readyReason(name string) string {
 }
 
 // eventTypesAndReasonsFor 列出作用在该对象上的事件，形如 "Warning/DeploymentReconcileFailed"。
-// 用 legacy corev1.Event：mgr.GetEventRecorderFor 返回的是"旧版"记录器，
-// 落到 core/v1 的 Event（新版的 mgr.GetEventRecorder 才会写 events.k8s.io/v1）。
+// 读 **events.k8s.io/v1**（新事件 API）：记录器来自 mgr.GetEventRecorder，
+// 所以对象字段是 `regarding`（旧 API 叫 involvedObject）。
 func eventTypesAndReasonsFor(name string) []string {
-	var events corev1.EventList
+	var events eventsv1.EventList
 	if err := k8sClient.List(ctx, &events, client.InNamespace(testNamespace)); err != nil {
 		return nil
 	}
 	out := make([]string, 0, len(events.Items))
 	for _, e := range events.Items {
-		if e.InvolvedObject.Name == name {
+		if e.Regarding.Name == name {
 			out = append(out, e.Type+"/"+e.Reason)
 		}
 	}

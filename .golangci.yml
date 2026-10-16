@@ -58,7 +58,8 @@ linters:
       - examples$
       # hack/ 下是本地取证探针（对着真 kube-apiserver 压实验用的小工具），
       # 不是产品代码，不参与 lint；gofmt 仍然管它们。
-      - hack$
+      # 注意正则写法：必须能匹配到具体文件路径（`hack$` 匹配不到 `hack/xxx/main.go`）。
+      - ^hack/
 formatters:
   enable:
     - gofmt

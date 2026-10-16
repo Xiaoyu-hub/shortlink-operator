@@ -184,7 +184,7 @@ func main() {
 		// 所以安全；若将来在 Start 之后加了清理逻辑，需要重新评估这个开关。
 		//
 		// 实测踩到的运维坑：用**同一个镜像 tag** 重新 make deploy 不会重启 Pod
-		//（Pod 模板没变 → 不触发滚动更新），于是"换了二进制"是幻觉——leader 还在跑旧进程。
+		// （Pod 模板没变 → 不触发滚动更新），于是"换了二进制"是幻觉——leader 还在跑旧进程。
 		// 换二进制必须显式 `kubectl rollout restart` 或改 tag。
 		LeaderElectionReleaseOnCancel: true,
 	})

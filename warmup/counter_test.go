@@ -45,14 +45,12 @@ func TestCounterConcurrent(t *testing.T) {
 			c := newCounter()
 
 			var wg sync.WaitGroup
-			for i := 0; i < goroutines; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for j := 0; j < perGoroutine; j++ {
+			for range goroutines {
+				wg.Go(func() {
+					for range perGoroutine {
 						c.Inc()
 					}
-				}()
+				})
 			}
 			wg.Wait()
 
@@ -68,7 +66,7 @@ func TestCounterSequential(t *testing.T) {
 	for name, newCounter := range allCounters() {
 		t.Run(name, func(t *testing.T) {
 			c := newCounter()
-			for i := 0; i < 10; i++ {
+			for range 10 {
 				c.Inc()
 			}
 			c.IncN(-3) // 加入负数：IncN 的语义就是"加"，不做下界钳制
@@ -95,28 +93,24 @@ func TestCounterMixedReadersAndWriters(t *testing.T) {
 			c := newCounter()
 
 			var wg sync.WaitGroup
-			for i := 0; i < writers; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for j := 0; j < perWriter; j++ {
+			for range writers {
+				wg.Go(func() {
+					for range perWriter {
 						c.Inc()
 					}
-				}()
+				})
 			}
 
 			// 4 个读者一边读一边跑，制造 read/write 交错。
-			for i := 0; i < 4; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for j := 0; j < 2000; j++ {
+			for range 4 {
+				wg.Go(func() {
+					for range 2000 {
 						if v := c.Value(); v < 0 {
 							t.Errorf("counter 不该为负：%d", v)
 							return
 						}
 					}
-				}()
+				})
 			}
 
 			wg.Wait()
@@ -141,12 +135,10 @@ func TestIncNSubtotalIsAtomic(t *testing.T) {
 			c := newCounter()
 
 			var wg sync.WaitGroup
-			for i := 0; i < 64; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+			for range 64 {
+				wg.Go(func() {
 					c.IncN(10000)
-				}()
+				})
 			}
 			wg.Wait()
 
@@ -189,7 +181,7 @@ func TestShardedCounterRoundsShardCountToPowerOfTwo(t *testing.T) {
 	// 三种实现的行为必须一致：分片数不改变"计数"这个语义。
 	a := NewShardedCounter(1)
 	var m Counter
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		a.Inc()
 		m.Inc()
 	}
@@ -209,14 +201,12 @@ func TestShardedCounterWritesSpreadAcrossShards(t *testing.T) {
 	c := NewShardedCounter(shards)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < writes/32; j++ {
+	for range 32 {
+		wg.Go(func() {
+			for range writes / 32 {
 				c.Inc()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -247,19 +237,17 @@ func TestShardedCounterFastPath(t *testing.T) {
 	c := NewShardedCounter(shards)
 
 	var wg sync.WaitGroup
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 
 			// ↓ 整个 goroutine 生命周期里只取一次分片下标（模拟 controller
 			// worker 启动时绑定自己的分片）。
 			idx := c.ShardIndex()
-			for j := 0; j < perGoroutine; j++ {
+			for range perGoroutine {
 				c.IncAt(idx)
 			}
 			c.IncNAt(idx, -1) // 用掉 IncNAt，顺带验证负数增量
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -20,12 +20,6 @@ import (
 // 预期形态：低并发时 atomic ≈ sharded < mutex；并发越高，
 // mutex 因"排队 + 唤醒"掉得越快，sharded 因"各写各的缓存行"最抗跌。
 
-// benchCounters 只做基准，所以用最简的接口。
-type benchCounter interface {
-	Inc()
-	Value() int64
-}
-
 func BenchmarkCounterMutex(b *testing.B) {
 	c := new(Counter)
 	b.ReportAllocs()
@@ -92,7 +86,7 @@ func BenchmarkCounterShardedFastPath(b *testing.B) {
 
 func BenchmarkCounterShardedValue(b *testing.B) {
 	c := NewShardedCounter(64)
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		c.Inc()
 	}
 
@@ -109,7 +103,7 @@ func BenchmarkCounterShardedValue(b *testing.B) {
 
 func BenchmarkCounterMutexValue(b *testing.B) {
 	c := new(Counter)
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		c.Inc()
 	}
 

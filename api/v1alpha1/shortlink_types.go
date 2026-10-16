@@ -122,7 +122,7 @@ type ShortlinkSpec struct {
 	Paused bool `json:"paused,omitempty"`
 
 	// maxSurge / maxUnavailable 控制滚动更新的节奏，语义与 Deployment 完全一致
-	//（可写百分比 "25%" 或绝对数 1）。
+	// （可写百分比 "25%" 或绝对数 1）。
 	//
 	// 刻意用指针且**不给 CRD 默认值**：nil 的语义是「本 operator 不声明这个字段」，
 	// 于是控制器既不写它、也不比较它，让 Deployment 自己的默认值（25%/25%）生效。

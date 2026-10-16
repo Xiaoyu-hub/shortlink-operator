@@ -128,7 +128,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprint(w, `shortlink-operator · Day 1 warmup
+	_, _ = fmt.Fprint(w, `shortlink-operator · Day 1 warmup
 
 GET /healthz                                    存活探针
 GET /count?kind=mutex|atomic|sharded            读当前计数
@@ -139,7 +139,7 @@ GET /sum?n=10                                   纯 channel 演练：n 个 gorou
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "ok")
+	_, _ = fmt.Fprintln(w, "ok")
 }
 
 // handleCount 读计数。kind 参数决定读哪一种实现。
@@ -150,7 +150,7 @@ func handleCount(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown kind，可选：mutex / atomic / sharded", http.StatusBadRequest)
 		return
 	}
-	fmt.Fprintf(w, "kind = %s\ncount = %d\n", kind, c.Value())
+	_, _ = fmt.Fprintf(w, "kind = %s\ncount = %d\n", kind, c.Value())
 }
 
 // handleInc 是 goroutine + 共享状态演练。
@@ -175,29 +175,27 @@ func handleInc(w http.ResponseWriter, r *http.Request) {
 	before := c.Value()
 
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < perWorker; j++ {
+	for range workers {
+		wg.Go(func() {
+			for range perWorker {
 				c.Inc()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
 	expected := int64(workers) * int64(perWorker)
 	got := c.Value() - before
 
-	fmt.Fprintf(w, "kind       = %s\n", kind)
-	fmt.Fprintf(w, "goroutines = %d, perWorker = %d\n", workers, perWorker)
-	fmt.Fprintf(w, "expected   = %d\n", expected)
-	fmt.Fprintf(w, "actual     = %d\n", got)
+	_, _ = fmt.Fprintf(w, "kind       = %s\n", kind)
+	_, _ = fmt.Fprintf(w, "goroutines = %d, perWorker = %d\n", workers, perWorker)
+	_, _ = fmt.Fprintf(w, "expected   = %d\n", expected)
+	_, _ = fmt.Fprintf(w, "actual     = %d\n", got)
 	if got != expected {
-		fmt.Fprintf(w, "❌ 丢了 %d 次更新 —— 这个 Counter 实现不并发安全\n", expected-got)
+		_, _ = fmt.Fprintf(w, "❌ 丢了 %d 次更新 —— 这个 Counter 实现不并发安全\n", expected-got)
 		return
 	}
-	fmt.Fprintln(w, "✅ 一致")
+	_, _ = fmt.Fprintln(w, "✅ 一致")
 }
 
 // handleSum 是纯 channel 演练：
@@ -216,11 +214,11 @@ func handleSum(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total := 0
-	for i := 0; i < n; i++ {
+	for range n {
 		total += <-results
 	}
 
-	fmt.Fprintf(w, "sum(i*i, i=1..%d) = %d\n", n, total)
+	_, _ = fmt.Fprintf(w, "sum(i*i, i=1..%d) = %d\n", n, total)
 }
 
 func kindParam(r *http.Request) string {
