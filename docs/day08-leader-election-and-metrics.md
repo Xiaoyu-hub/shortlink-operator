@@ -42,7 +42,17 @@
 
 ### 2.3 两个实测踩到的坑
 
-1. **待命副本是 `0/1 Ready`**——这不是故障：controller-runtime 的 `readyz` 与"是否已当选 leader"绑定，非 leader 的副本故意报告未就绪（避免滚动更新时把正在干活的 leader 换掉）。
+1. ~~待命副本是 `0/1 Ready`：controller-runtime 的 `readyz` 与"是否已当选 leader"绑定，非 leader 故意报未就绪。~~
+   **上句是错的，已实测否定**：3 副本时**包括两个非 leader 在内全部 `1/1 Ready`**（`ready=true`）。
+   查证两条：
+   - 源码上 `readyz` 只是 `healthz.Ping`（`cmd/main.go:209`），健康检查服务器也不受 leadership 门控
+     （`manager.Server.OnlyServeWhenLeader` 未设置，见 `pkg/manager/server.go:92`）；
+   - 我最初看到的 `0/1` 那个 Pod **才创建 12 秒**，只是还没通过首次探测
+     （探针 `initialDelaySeconds=5 / periodSeconds=10`）。
+
+   ⇒ 又是一个同类教训（day05 的 RV 判据、day07 的 `k3d image import`、day08 的空文件求和，这是第 4 次）：
+   **不要从一次快照推断机制**。要判断"这是有意设计还是暂时状态"，要么复测（等 40 秒再看）、
+   要么读源码——两样都比编一个听起来合理的解释便宜。这条错误一度被我写进文档当结论。
 2. **同一个镜像 tag 重新 `make deploy` 不会重启 Pod**：Pod 模板没变 → 不触发滚动更新 → **换二进制是幻觉**，leader 还在跑旧进程。本次实测就被这个坑骗了一次（"开启 ReleaseOnCancel 后仍 17s"），实际是旧二进制仍在当 leader。换二进制必须 `kubectl rollout restart` 或改 tag。
 
 ## 三、metrics：默认就有，但默认拿不到
