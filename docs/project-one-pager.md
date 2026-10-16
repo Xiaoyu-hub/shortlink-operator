@@ -58,6 +58,12 @@ kubectl apply ──► Shortlink(CR)  spec: image / replicas / port / serviceTy
    不是手调 `Reconcile`）；真集群（k3d）补 envtest 永远测不到的那半：Pod 真的起来、删了真的会回来。
    取舍：envtest 没有 kcm/scheduler/kubelet/GC，永远测不了"就绪"与级联回收——必须诚实标注。
 
+6. **字段所有权可以被"让出去"**：接入 HPA 后，`spec.replicas` 从"我拥有"变成"HPA 拥有"，
+   于是必须**同时**改三处——期望构造器不再写它、`needsUpdate` 不再比它、覆写前把它搬回；
+   连 `Ready` 的判据也得从"CR 的 replicas"换成"Deployment 自己的 replicas"。
+   取舍：这就是"手写 diff 世界里的所有权划分"，能用但每多一个字段就多三处改动——
+   SSA 的价值（让 API Server 记账）在这里体现得最清楚。
+
 ## 实测证据（可复现，面试可直接展示）
 
 | 结论 | 证据 / 复现方式 |
@@ -71,11 +77,14 @@ kubectl apply ──► Shortlink(CR)  spec: image / replicas / port / serviceTy
 
 ## 已知边界（诚实清单）
 
-- **没有 webhook**：校验下沉到 CRD 的 OpenAPI schema（`make manifests` 生成）。
+- **没有 webhook**：校验下沉到 CRD 的 OpenAPI schema + CEL 规则（`make manifests` 生成）。
 - **`selector` 在写入集合里、不在比较集合里**：行为已实测（静默偏离 → 被别的漂移触发时响亮失败），
   修法已定（报告而非修复），尚未实施。
-- **未接 HPA**：目前假设"本 operator 是 replicas 的唯一写者"；接 HPA 时 `replicas` 会打架，届时应评估 SSA。
-- **手写 diff 而非 Server-Side Apply**：单写者场景够用，多写者场景应迁移。
+- **HPA 已接，方式是"让位"**：声明 `spec.autoscaling` 后，`spec.replicas` 的所有权交给 HPA——
+  控制器**不写、不比、覆写前搬回**，并把 `Ready` 的判据换成 Deployment 自己的 `spec.replicas`。
+  真集群实测：1 → 4 → 5（上限）→ 稳定窗口后缩回 1，全程 `Scaled` 事件 0 条（控制器一次都没写过副本数）。
+  **尚未迁到 SSA**：目前用"反向搬运"实现所有权划分；再出现第三个写者时应该评估迁移。
+- **手写 diff 而非 Server-Side Apply**：单/双写者场景够用（HPA 已用搬回解决），更多写者场景应迁移。
 - 项目一（消费侧服务）**只有设计，未实现**——本 operator 用占位镜像即可完整演示。
 
 ## 3 分钟讲稿骨架
