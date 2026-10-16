@@ -144,7 +144,12 @@ SUCCESS! -- 5 Passed | 0 Failed | 0 Pending | 0 Skipped
 ## 九、下一步
 
 - Day 5 的问答与复盘已并入 `docs/day05`（见第十节勘误）与下面的 9.1；Day 6 按 9.1 执行。
-- `make test` 在本机仍会卡在 setup-envtest（DNS 劫持），已在第二节备注绕过路径；CI（Linux）无此问题。
+- ~~`make test` 在本机仍会卡在 setup-envtest（DNS 劫持），已在第二节备注绕过路径；**CI（Linux）无此问题**。~~
+  **后半句是错的（2026-10-16 实测修正）**：CI（Linux）**同样**卡在 `ENVTEST_VERSION` 推导上——
+  `Set ENVTEST_VERSION manually (controller-runtime replace has no tag)` → setup-envtest 装不上
+  → Tests / E2E 两个 job 全红。根因不是网络，而是 `go list -m` 对**指向本地目录的 replace**
+  取不到版本号（`.Replace.Version` 为空）。已修：Makefile 的 `gomodver` 宏回退到 `.Version`
+  （require 行声明的版本），本机与 CI 都推导出 `v0.25.0`。详见 `docs/day08` 第五节。
 
 ### 9.1 Day 6 待办清单（Day 5 复盘产出，按依赖排序）
 

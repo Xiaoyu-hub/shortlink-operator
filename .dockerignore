@@ -12,3 +12,10 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+# 嵌套的 go.mod 也必须进构建上下文：go.mod 里有指向本地的 replace
+#   replace sigs.k8s.io/controller-runtime => ./third_party/controller-runtime
+# 而 `RUN go mod download` 需要读那个目录自己的 go.mod。只放行根目录的 go.mod 时，
+# 容器里会报 "reading third_party/controller-runtime/go.mod: no such file or directory"
+# （E2E 的 docker-build 就是这样挂的）。.go 文件已由上面的 !**/*.go 放行。
+!**/go.mod
+!**/go.sum

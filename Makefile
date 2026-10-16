@@ -264,6 +264,12 @@ mv "$(LOCALBIN)/$$(basename "$(1)")" "$(1)-$(3)" ;\
 ln -sf "$$(realpath "$(1)-$(3)")" "$(1)"
 endef
 
+# 取 go.mod 里某模块的版本号。replace 有两种形态，必须都覆盖：
+#   1) 带版本的替换（=> other/module v1.2.3）：用 .Replace.Version；
+#   2) 指向本地目录的替换（=> ./third_party/xxx）：.Replace.Version 是空串，
+#      必须回退到 .Version（require 行声明的版本），否则推导出空值，
+#      setup-envtest 会以 "version must not be empty" 失败（本机与 CI 都会中招）。
+# 注意：注释不要写进 define 体内 —— define 会原样保留，注释会泄漏进 shell 命令。
 define gomodver
-$(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
+$(shell go list -m -f '{{if and .Replace .Replace.Version}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
