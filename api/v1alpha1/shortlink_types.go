@@ -61,20 +61,32 @@ const (
 	// ReasonDeploymentNotFound → Ready=False：子资源 Deployment 尚不存在。
 	// 首次创建后缓存未同步时可能短暂出现，下一轮事件会纠正。
 	ReasonDeploymentNotFound = "DeploymentNotFound"
-	// ReasonDeploymentReconcileFailed / ReasonServiceReconcileFailed → Ready=False：
-	// 调和子资源时出错，正由 workqueue 退避重试；此时 status.observedGeneration 不推进。
+	// ReasonDeploymentReconcileFailed / ReasonServiceReconcileFailed / ReasonHPAReconcileFailed
+	// → Ready=False：调和子资源时出错，正由 workqueue 退避重试；此时 status.observedGeneration 不推进。
 	ReasonDeploymentReconcileFailed = "DeploymentReconcileFailed"
 	ReasonServiceReconcileFailed    = "ServiceReconcileFailed"
+	ReasonHPAReconcileFailed        = "HPAReconcileFailed"
 )
 
 // ShortlinkSpec 描述短链服务的期望状态。
 // 注意：这里只放「用户想要什么」，不放「现在怎么样了」。
+//
+// CEL 互斥校验：replicas 与 autoscaling 不能同时声明。
+// 放在准入期做（而不是控制器里做）的理由：非法形状**根本不该落库**——落库后再由控制器
+// 报错，用户会先看到一个"被接受然后失败"的 CR，工具链与 GitOps 也会把它当成有效状态。
+// 注意这条规则依赖 replicas **没有 CRD 默认值**（否则 has() 恒为真，规则形同虚设）。
+// +kubebuilder:validation:XValidation:rule="!(has(self.autoscaling) && has(self.replicas))",message="replicas 与 autoscaling 互斥：启用 HPA 后副本数由 HPA 管理，请移除 replicas"
 type ShortlinkSpec struct {
 	// replicas 是期望的 Pod 副本数。
 	// 用 *int32 而不是 int32：Go 的零值 0 与「用户没写这个字段」无法区分，
-	// 而这两者语义完全不同（0 = 明确缩容到 0，未设置 = 用 default）。
+	// 而这两者语义完全不同（0 = 明确缩容到 0，未设置 = 用默认 1）。
+	//
+	// 刻意**不给 CRD 默认值**（早期版本给过 `+kubebuilder:default=1`，已移除）：
+	// 默认值会在准入时把 nil 填成 1，于是「用户到底有没有显式写过 replicas」这件事
+	// 在 API Server 侧永久丢失——既让指针失去意义，也让下面那条 CEL 互斥规则失效
+	// （它需要 has(self.replicas) 来判断"用户是否声明过"）。
+	// 未设置时的默认 1 由控制器在 desiredReplicas 里兜底，行为不变。
 	// +optional
-	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
 
@@ -133,6 +145,37 @@ type ShortlinkSpec struct {
 
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// autoscaling 可选：声明后由 HPA 接管副本数伸缩。
+	//
+	// 与 spec.replicas **互斥**（由下方 CEL 规则在准入期静态拒绝）。启用后控制器的
+	// 写入集合与比较集合里都不再包含 Deployment 的 replicas——这份所有权让给 HPA；
+	// 否则两边会互相写、来回打（每次都是真写入 + 事件风暴）。
+	// 这是「多写者出现时，字段所有权必须重新划分」的第一个真实触发点。
+	// +optional
+	Autoscaling *AutoscalingSpec `json:"autoscaling,omitempty"`
+}
+
+// AutoscalingSpec 声明 HPA 的伸缩区间与 CPU 目标利用率。
+type AutoscalingSpec struct {
+	// minReplicas 是 HPA 的下限；不写按 1 处理（与 HPA 自己的默认一致）。
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MinReplicas *int32 `json:"minReplicas,omitempty"`
+
+	// maxReplicas 是 HPA 的上限。
+	// +kubebuilder:validation:Minimum=1
+	MaxReplicas int32 `json:"maxReplicas"`
+
+	// targetCPUUtilizationPercentage 是所有 Pod 的平均 CPU 利用率目标。
+	// 这里**必填**（不是指针）：HPA 的 Utilization 指标类型必须有目标值，缺了会被 API Server
+	// 以 "must specify averageUtilization" 拒绝——与其让它在控制器运行时炸，不如让准入期就拦住。
+	//
+	// 注意：HPA 依赖**容器的 resources.requests.cpu** 才能算利用率——没有 requests 时
+	// HPA 会报 "missing request for cpu" 而不伸缩（spec.resources 因此变成事实上的必填）。
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	TargetCPUUtilizationPercentage int32 `json:"targetCPUUtilizationPercentage"`
 }
 
 // ShortlinkStatus 描述控制器观测到的真实状态。

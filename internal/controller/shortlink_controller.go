@@ -22,6 +22,7 @@ import (
 	"reflect"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -61,12 +62,14 @@ const (
 	eventReasonCreated = "Created"
 	eventReasonUpdated = "Updated"
 	eventReasonScaled  = "Scaled"
+	eventReasonDeleted = "Deleted"
 
 	// events.k8s.io/v1 的 Event 除了 reason 还有 action 字段：reason 说"结果是什么"，
 	// action 说"控制器尝试做了什么"。两者刻意分开，便于按动作聚合/告警。
 	eventActionCreate    = "Create"
 	eventActionUpdate    = "Update"
 	eventActionScale     = "Scale"
+	eventActionDelete    = "Delete"
 	eventActionReconcile = "Reconcile"
 )
 
@@ -93,6 +96,11 @@ type ShortlinkReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services/status,verbs=get
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// 同时授权 core/v1 events：实测集群里事件落在了 core/v1（而 envtest 里能在 events.k8s.io/v1 查到），
+// 说明"记录器写哪个 API 组"受 controller-runtime 内部装配影响。两组都授，避免因实现细节
+// 导致事件被 API Server 以 Forbidden 静默拒绝（事件丢失是最难发现的一类故障）。
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile 把集群中的 Deployment/Service 收敛到 Shortlink 声明的期望状态。
 //
@@ -137,6 +145,10 @@ func (r *ShortlinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Error(err, "Failed to reconcile Service", "name", cr.Name, "namespace", cr.Namespace)
 		return ctrl.Result{}, r.reportFailure(ctx, &cr, shortlinkv1alpha1.ReasonServiceReconcileFailed, err)
 	}
+	if err := r.reconcileHPA(ctx, &cr); err != nil {
+		logger.Error(err, "Failed to reconcile HorizontalPodAutoscaler", "name", cr.Name, "namespace", cr.Namespace)
+		return ctrl.Result{}, r.reportFailure(ctx, &cr, shortlinkv1alpha1.ReasonHPAReconcileFailed, err)
+	}
 	return ctrl.Result{}, r.updateStatus(ctx, &cr, true)
 }
 
@@ -155,6 +167,8 @@ func (r *ShortlinkReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// 这是「删 Pod 后自愈」「滚动后 status 刷新」的事件来源，不需要轮询。
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		// HPA 也纳入 watch：它被删/被改同样要自愈（第三件套）。
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Named("shortlink").
 		Complete(r)
 }
@@ -181,8 +195,14 @@ func (r *ShortlinkReconciler) reconcileDeployment(ctx context.Context, cr *short
 					actual.Name, *actual.Spec.Replicas, *desired.Spec.Replicas)
 			}
 			logger.Info("Updating Deployment", "name", actual.Name, "namespace", actual.Namespace)
+			// 搬回"不归我们"的字段再整体覆盖——与 reconcileService 搬 clusterIP 是同一个模式，
+			// 区别在动机：那边是"分配值不可变"，这边是"所有权在 HPA"。
+			currentReplicas := actual.Spec.Replicas
 			actual.Spec = desired.Spec
 			actual.Labels = desired.Labels
+			if !ownsReplicas(cr) {
+				actual.Spec.Replicas = currentReplicas
+			}
 			if err := r.Update(ctx, &actual); err != nil {
 				return err
 			}
@@ -264,6 +284,143 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 	return nil
 }
 
+// ---- HPA ----
+
+// desiredHPA 从 CR 构造期望的 HPA（纯函数，不读集群）。
+// 只声明我们负责的部分：scaleTargetRef 指向同名 Deployment，CPU 目标利用率来自 spec.autoscaling。
+func desiredHPA(cr *shortlinkv1alpha1.Shortlink) *autoscalingv2.HorizontalPodAutoscaler {
+	as := cr.Spec.Autoscaling
+	minReplicas := int32(1)
+	if as.MinReplicas != nil {
+		minReplicas = *as.MinReplicas
+	}
+	target := as.TargetCPUUtilizationPercentage
+	return &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cr.Name,
+			Namespace: cr.Namespace,
+			Labels:    appLabels(cr),
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       cr.Name,
+			},
+			MinReplicas: &minReplicas,
+			MaxReplicas: as.MaxReplicas,
+			Metrics: []autoscalingv2.MetricSpec{{
+				Type: autoscalingv2.ResourceMetricSourceType,
+				Resource: &autoscalingv2.ResourceMetricSource{
+					Name: corev1.ResourceCPU,
+					Target: autoscalingv2.MetricTarget{
+						Type:               autoscalingv2.UtilizationMetricType,
+						AverageUtilization: &target,
+					},
+				},
+			}},
+		},
+	}
+}
+
+// reconcileHPA 让集群里的 HPA 与 CR 的声明一致：
+//
+//	声明了 → 存在则比对着更新、不存在则创建（撞 AlreadyExists 交给事件驱动重试）；
+//	没声明 → 若还残留由我们创建的 HPA，删掉（"按需 create/delete"）。
+//
+// 注意 Controller Reference：HPA 挂在本 CR 上，删 CR 时由 GC 级联回收——
+// 但这也意味着"关闭 autoscaling"时必须显式删除（GC 只在 CR 被删时动手）。
+func (r *ShortlinkReconciler) reconcileHPA(ctx context.Context, cr *shortlinkv1alpha1.Shortlink) error {
+	logger := log.FromContext(ctx)
+	key := client.ObjectKeyFromObject(cr)
+
+	if cr.Spec.Autoscaling == nil {
+		var existing autoscalingv2.HorizontalPodAutoscaler
+		switch err := r.Get(ctx, key, &existing); {
+		case apierrors.IsNotFound(err):
+			return nil // 幂等：没有就什么都不做
+		case err != nil:
+			return err
+		}
+		if err := r.Delete(ctx, &existing); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, eventReasonDeleted, eventActionDelete,
+			"Deleted HorizontalPodAutoscaler %s (autoscaling disabled)", existing.Name)
+		return nil
+	}
+
+	desired := desiredHPA(cr)
+	if err := controllerutil.SetControllerReference(cr, desired, r.Scheme); err != nil {
+		return err
+	}
+
+	var actual autoscalingv2.HorizontalPodAutoscaler
+	err := r.Get(ctx, key, &actual)
+	if err == nil {
+		if hpaNeedsUpdate(&actual, desired) {
+			logger.Info("Updating HorizontalPodAutoscaler", "name", actual.Name, "namespace", actual.Namespace)
+			actual.Spec = desired.Spec
+			actual.Labels = desired.Labels
+			if err := r.Update(ctx, &actual); err != nil {
+				return err
+			}
+			r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, eventReasonUpdated, eventActionUpdate,
+				"Updated HorizontalPodAutoscaler %s", actual.Name)
+		}
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	logger.Info("Creating HorizontalPodAutoscaler", "name", desired.Name, "namespace", desired.Namespace)
+	if err := r.Create(ctx, desired); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		return nil
+	}
+	r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, eventReasonCreated, eventActionCreate,
+		"Created HorizontalPodAutoscaler %s", desired.Name)
+	return nil
+}
+
+// hpaNeedsUpdate 只比对本 operator 声明的字段。
+// 指标只比 CPU 利用率目标：别的指标类型我们不声明、也不拥有——但要注意整体覆盖
+// （actual.Spec = desired.Spec）仍会把它们抹掉，这是与 Deployment 完全同款的已知取舍。
+func hpaNeedsUpdate(actual, desired *autoscalingv2.HorizontalPodAutoscaler) bool {
+	if !reflect.DeepEqual(actual.Labels, desired.Labels) {
+		return true
+	}
+	if actual.Spec.ScaleTargetRef != desired.Spec.ScaleTargetRef {
+		return true
+	}
+	if !reflect.DeepEqual(actual.Spec.MinReplicas, desired.Spec.MinReplicas) {
+		return true
+	}
+	if actual.Spec.MaxReplicas != desired.Spec.MaxReplicas {
+		return true
+	}
+	at, aok := cpuUtilizationTarget(actual.Spec.Metrics)
+	dt, dok := cpuUtilizationTarget(desired.Spec.Metrics)
+	return !aok || !dok || at != dt
+}
+
+// cpuUtilizationTarget 从指标列表里取出 CPU 利用率目标（不存在时 ok=false）。
+func cpuUtilizationTarget(metrics []autoscalingv2.MetricSpec) (int32, bool) {
+	for _, m := range metrics {
+		if m.Type != autoscalingv2.ResourceMetricSourceType || m.Resource == nil {
+			continue
+		}
+		if m.Resource.Name != corev1.ResourceCPU || m.Resource.Target.AverageUtilization == nil {
+			continue
+		}
+		return *m.Resource.Target.AverageUtilization, true
+	}
+	return 0, false
+}
+
 // ---- status 写回 ----
 
 // updateStatus 把「对期望状态的最新观察」写回 status。
@@ -282,7 +439,7 @@ func (r *ShortlinkReconciler) updateStatus(ctx context.Context, cr *shortlinkv1a
 		if advanceGeneration {
 			// 结论：只有「最新 spec 这一轮被完整走完」才更新。
 			s.ObservedGeneration = cr.Generation
-			meta.SetStatusCondition(&s.Conditions, readyCondition(cr, desiredReplicas(cr), st))
+			meta.SetStatusCondition(&s.Conditions, readyCondition(cr, expectedReplicas(cr, st), st))
 		}
 	})
 	if err != nil || !changed {
@@ -357,6 +514,9 @@ type deploymentState struct {
 	found     bool
 	available bool
 	ready     int32
+	// specReplicas 是 Deployment **自己**声明的副本数。autoscaling 模式下它是 HPA 写的值，
+	// 也就是"这一层此刻的真实期望"——Ready 的判据必须用它，而不是 CR 里的 replicas。
+	specReplicas *int32
 }
 
 // observeDeployment 从 Deployment.status 读真实观测。
@@ -370,7 +530,7 @@ func (r *ShortlinkReconciler) observeDeployment(ctx context.Context, cr *shortli
 	if err := r.Get(ctx, client.ObjectKeyFromObject(cr), &deploy); err != nil {
 		return deploymentState{}
 	}
-	st := deploymentState{found: true, ready: deploy.Status.ReadyReplicas}
+	st := deploymentState{found: true, ready: deploy.Status.ReadyReplicas, specReplicas: deploy.Spec.Replicas}
 	for _, c := range deploy.Status.Conditions {
 		if c.Type == appsv1.DeploymentAvailable && c.Status == corev1.ConditionTrue {
 			st.available = true
@@ -378,6 +538,19 @@ func (r *ShortlinkReconciler) observeDeployment(ctx context.Context, cr *shortli
 		}
 	}
 	return st
+}
+
+// expectedReplicas 是 Ready 判据里的"分母"：
+//
+//	副本数归本控制器 → 用 CR 的期望；
+//	归 HPA          → 用 Deployment.spec.replicas（HPA 写的），因为那才是此刻的真实期望。
+//
+// 这是"所有权变更会连带改变判据"的一个具体例子：同一个 Ready 条件，在两种模式下算的东西不同。
+func expectedReplicas(cr *shortlinkv1alpha1.Shortlink, st deploymentState) int32 {
+	if !ownsReplicas(cr) && st.specReplicas != nil {
+		return *st.specReplicas
+	}
+	return desiredReplicas(cr)
 }
 
 // readyCondition 把观测快照翻译成 Ready 条件。三种未就绪各有独立 Reason。
@@ -443,7 +616,7 @@ func desiredDeployment(cr *shortlinkv1alpha1.Shortlink) *appsv1.Deployment {
 	labels := appLabels(cr)
 	replicas := desiredReplicas(cr)
 	port := cr.Spec.Port
-	return &appsv1.Deployment{
+	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cr.Name,
 			Namespace: cr.Namespace,
@@ -486,6 +659,19 @@ func desiredDeployment(cr *shortlinkv1alpha1.Shortlink) *appsv1.Deployment {
 			},
 		},
 	}
+	// 让位：声明了 autoscaling 时副本数归 HPA，我们不声明它（nil = 不拥有）。
+	// 注意整体覆盖仍然会写 Spec —— 搬运在 reconcileDeployment 里做。
+	if !ownsReplicas(cr) {
+		dep.Spec.Replicas = nil
+	}
+	return dep
+}
+
+// ownsReplicas 表示 Deployment 的 spec.replicas 是否归本控制器所有。
+// 声明了 autoscaling 时归 HPA：我们既不写、也不比较它，并在覆写前把 HPA 写的值原样搬回，
+// 否则整体覆盖会把它抹回默认值（Deployment 的 replicas 默认 1），变成"控制器和 HPA 抢副本数"。
+func ownsReplicas(cr *shortlinkv1alpha1.Shortlink) bool {
+	return cr.Spec.Autoscaling == nil
 }
 
 // desiredStrategy 把 CR 的滚动参数翻译成 Deployment 的滚动策略。
@@ -553,7 +739,9 @@ func deploymentNeedsUpdate(actual, desired *appsv1.Deployment) bool {
 	if !reflect.DeepEqual(actual.Labels, desired.Labels) {
 		return true
 	}
-	if !reflect.DeepEqual(actual.Spec.Replicas, desired.Spec.Replicas) {
+	// 条件性所有权：desired 里 replicas 为 nil ⇒ 我们不拥有它（HPA 拥有）⇒ 不比较。
+	// 与 rollingUpdateDiffers 里 nil 的语义同构：写它才比它，不写它就别比它。
+	if desired.Spec.Replicas != nil && !reflect.DeepEqual(actual.Spec.Replicas, desired.Spec.Replicas) {
 		return true
 	}
 	if !reflect.DeepEqual(actual.Spec.Template.Labels, desired.Spec.Template.Labels) {

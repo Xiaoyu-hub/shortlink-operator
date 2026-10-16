@@ -24,9 +24,11 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -456,6 +458,113 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 		})
 	})
 
+	// HPA：多写者出现时，「字段所有权必须重新划分」的第一个真实触发点。
+	// 我们声明 autoscaling 后，Deployment 的 replicas 就归 HPA —— 既不写、也不比较，
+	// 并在整体覆盖前把 HPA 写的值原样搬回。
+	Context("HPA（把 replicas 的所有权让出去）", func() {
+		It("声明 autoscaling 后创建 HPA；且控制器不再写/不再拉回 Deployment 的 replicas", func() {
+			name := "autoscale"
+			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
+				s.Spec.Autoscaling = &shortlinkv1alpha1.AutoscalingSpec{
+					MaxReplicas:                    5,
+					TargetCPUUtilizationPercentage: 60,
+				}
+				// HPA 算利用率依赖 requests.cpu
+				s.Spec.Resources = corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m")},
+				}
+			}))).To(Succeed())
+
+			By("HPA 应被创建，且只声明我们负责的部分")
+			var hpa autoscalingv2.HorizontalPodAutoscaler
+			Eventually(func() error {
+				return k8sClient.Get(ctx, objectKey(name), &hpa)
+			}, timeout, interval).Should(Succeed())
+			Expect(hpa.Spec.ScaleTargetRef).To(Equal(autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1", Kind: "Deployment", Name: name,
+			}))
+			Expect(*hpa.Spec.MinReplicas).To(Equal(int32(1)))
+			Expect(hpa.Spec.MaxReplicas).To(Equal(int32(5)))
+			Expect(hpa.Spec.Metrics).To(HaveLen(1))
+			Expect(*hpa.Spec.Metrics[0].Resource.Target.AverageUtilization).To(Equal(int32(60)))
+			Expect(hpa.GetOwnerReferences()).To(HaveLen(1))
+
+			By("Deployment 的 replicas 不由我们声明（envtest 没有 kcm/HPA 控制器，会是 API Server 默认的 1）")
+			Eventually(func() int32 {
+				return deploymentSpecReplicas(name)
+			}, timeout, interval).Should(Equal(int32(1)))
+
+			By("模拟 HPA 写入 replicas=3：控制器必须不去拉回它")
+			var d appsv1.Deployment
+			Expect(k8sClient.Get(ctx, objectKey(name), &d)).To(Succeed())
+			d.Spec.Replicas = new(int32(3))
+			d.Spec.Template.Spec.Containers[0].Image = "nginx:1.27" // 顺手制造一个"被比较字段"的漂移
+			Expect(k8sClient.Update(ctx, &d)).To(Succeed())
+
+			By("覆写确实发生了（镜像被拉回期望），但 replicas 保持 HPA 写的 3 —— 搬运生效")
+			Consistently(func() int32 {
+				return deploymentSpecReplicas(name)
+			}, 2*time.Second, interval).Should(Equal(int32(3)))
+			Eventually(func() string {
+				return deploymentImage(name)
+			}, timeout, interval).Should(Equal(defaultImage))
+		})
+
+		It("删掉 HPA 会被自动重建；关掉 autoscaling 会删除它", func() {
+			name := "autoscale-heal"
+			Expect(k8sClient.Create(ctx, newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
+				s.Spec.Autoscaling = &shortlinkv1alpha1.AutoscalingSpec{
+					MaxReplicas:                    3,
+					TargetCPUUtilizationPercentage: 80,
+				}
+			}))).To(Succeed())
+
+			var first autoscalingv2.HorizontalPodAutoscaler
+			Eventually(func() error {
+				return k8sClient.Get(ctx, objectKey(name), &first)
+			}, timeout, interval).Should(Succeed())
+			firstUID := first.UID
+
+			By("删掉 HPA → Owns(HPA) 反查 owner 入队 → 重建（UID 必须换新）")
+			Expect(k8sClient.Delete(ctx, &first)).To(Succeed())
+			Eventually(func() bool {
+				var h autoscalingv2.HorizontalPodAutoscaler
+				if err := k8sClient.Get(ctx, objectKey(name), &h); err != nil {
+					return false
+				}
+				return h.UID != firstUID
+			}, timeout, interval).Should(BeTrue())
+
+			By("关掉 autoscaling → 控制器按需删除 HPA（GC 只在 CR 被删时动手，这里必须显式删）")
+			Eventually(func() error {
+				var s shortlinkv1alpha1.Shortlink
+				if err := k8sClient.Get(ctx, objectKey(name), &s); err != nil {
+					return err
+				}
+				s.Spec.Autoscaling = nil
+				return k8sClient.Update(ctx, &s)
+			}, timeout, interval).Should(Succeed())
+			Eventually(func() bool {
+				var h autoscalingv2.HorizontalPodAutoscaler
+				return apierrors.IsNotFound(k8sClient.Get(ctx, objectKey(name), &h))
+			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("replicas 与 autoscaling 同时声明会被准入期拒绝（CEL）", func() {
+			name := "both-scaling-modes"
+			cr := newTestShortlink(name, func(s *shortlinkv1alpha1.Shortlink) {
+				s.Spec.Replicas = new(int32(2))
+				s.Spec.Autoscaling = &shortlinkv1alpha1.AutoscalingSpec{
+					MaxReplicas:                    3,
+					TargetCPUUtilizationPercentage: 80,
+				}
+			})
+			err := k8sClient.Create(ctx, cr)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "应被 CRD 的 CEL 规则拒绝：%v", err)
+		})
+	})
+
 	Context("就绪探针与滚动策略（比较与写入一起加）", func() {
 		It("声明的 maxSurge/maxUnavailable 与 readinessProbe 都落到 Deployment 上；只改 maxSurge 也会被推进", func() {
 			name := "probe-strategy"
@@ -563,6 +672,15 @@ func shortlinkObservedGeneration(name string) (observed, generation int64) {
 		return -1, -1
 	}
 	return s.Status.ObservedGeneration, s.Generation
+}
+
+// deploymentSpecReplicas 读 Deployment 的 spec.replicas（nil 时返回 -1）。
+func deploymentSpecReplicas(name string) int32 {
+	var d appsv1.Deployment
+	if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil || d.Spec.Replicas == nil {
+		return -1
+	}
+	return *d.Spec.Replicas
 }
 
 // deploymentMaxSurge 读 Deployment 的 maxSurge 字符串形态（"1" / "25%"）。

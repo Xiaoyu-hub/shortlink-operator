@@ -23,6 +23,14 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - apps
   resources:
   - deployments
@@ -41,12 +49,17 @@ rules:
   verbs:
   - get
 - apiGroups:
-  - events.k8s.io
+  - autoscaling
   resources:
-  - events
+  - horizontalpodautoscalers
   verbs:
   - create
+  - delete
+  - get
+  - list
   - patch
+  - update
+  - watch
 - apiGroups:
   - shortlink.dev
   resources:
