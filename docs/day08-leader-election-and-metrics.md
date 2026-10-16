@@ -122,11 +122,29 @@ rest_client_requests_total{code="201",method="POST"}  2     ← 与基线相同�
 
 前两次同类教训：`resourceVersion` 测不出多余写请求（day05 10.4）、`k3d image import` 报成功但镜像没进节点（day07 坑 2）。**共同点：验收看结果，不看返回值；解读数字前先确认数字是真的。**
 
-## 五、遗留
+## 五、CI 跑绿：四个根因，全是"本机能跑、Linux 上不行"
+
+接手时三个 job（Tests / E2E / Lint）**全红**，而且不是当天才红的。逐个查 CI 日志（`gh run view <id> --log-failed`）定位到四类根因——**没有一个是 K8s 知识，全是跨平台与构建上下文**：
+
+| # | 现象（CI 日志原文） | 根因 | 修法 |
+|---|---------------------|------|------|
+| 1 | `open hack\boilerplate.go.txt: no such file or directory` → `make generate` 失败 | Makefile 里用了 **Windows 反斜杠**路径；Windows 能跑，Linux 上是字面文件名 | 改成正斜杠 `hack/boilerplate.go.txt`（两平台都成立） |
+| 2 | `Set ENVTEST_VERSION manually (controller-runtime replace has no tag)` → `version must not be empty` | `go list -m` 对**指向本地目录的 replace** 取不到版本（`.Replace.Version` 为空） | `gomodver` 宏：有带版本 replace 用 `.Replace.Version`，否则回退 `.Version`（require 行版本）。实测推出 `v0.25.0` |
+| 3 | `reading third_party/controller-runtime/go.mod: no such file or directory`（docker build） | ①`.dockerignore` 只放行根目录的 `go.mod`；②**更关键**：`COPY . .` 在 `RUN go mod download` 之后，那一刻容器里压根没有 `third_party/` | ①补 `!**/go.mod`、`!**/go.sum`；②在 download **之前**显式 `COPY third_party/ third_party/` |
+| 4 | 34 个 lint 问题（errcheck/goconst/lll/modernize/revive/staticcheck/unused） | 混合：探针文件被误纳入 lint、Day 1 的 warmup 代码、以及一处真实 deprecation | 修掉全部；其中 `mgr.GetEventRecorderFor`（已 deprecated）**真迁移**到 `mgr.GetEventRecorder`（events.k8s.io/v1），RBAC 组随之改，测试改读 `eventsv1.EventList` |
+
+**三条方法论**（比修法本身更值得记）：
+
+1. **"本机能跑"是最有欺骗性的验证**。根因 1、2 都是"Windows 上好好的"——真正跨平台的写法（正斜杠、对本地 replace 的版本回退）能同时成立。
+2. **本地装上 CI 用的同一套工具再修**。装 golangci-lint 时遇到自定义插件在 Windows 下构建失败（`plugin "logcheck" not found`），临时禁用插件块后在本地把 34 个问题收敛到 0，最后**恢复插件配置**再推——不然就要靠一轮轮 CI 试。
+3. **修完要能自己验证，而不是"推上去看"**。根因 3 的第一版修法（只改 `.dockerignore`）就是猜的，推上去照样红；第二版用**只依赖本地 busybox 的探针 build** 验证了 `COPY` 顺序确实让 `third_party/controller-runtime/go.mod` 就位，才推。
+
+顺带修正 `docs/day05` 第九节的一句错话（"CI（Linux）无此问题"）——实测 CI 踩的是**同一个** ENVTEST_VERSION 坑，而且根因不是网络而是 replace。
+
+## 六、遗留
 
 | # | 事项 |
 |---|------|
-| 1 | CI 跑绿（workflow 是脚手架带的，需确认 Linux 环境下 `make test` 通过） |
-| 2 | 一页纸项目简介（投递必需，也是"3 分钟讲项目"的底稿） |
-| 3 | 把 metrics 的抓取绑定写成仓库产物（现在只是文档里的命令） |
-| 4 | 零写入的 envtest 自动化（计数 RoundTripper） |
+| 1 | 一页纸项目简介（投递必需，也是"3 分钟讲项目"的底稿） |
+| 2 | 把 metrics 的抓取绑定写成仓库产物（现在只是文档里的命令） |
+| 3 | 零写入的 envtest 自动化（计数 RoundTripper） |
