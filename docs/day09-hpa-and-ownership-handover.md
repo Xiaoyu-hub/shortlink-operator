@@ -104,7 +104,42 @@ kubectl logs ... | grep -c "Updating Deployment"      # → 0
 教训：`Owns()` / `Watches()` 是"给控制器加一条输入"，加输入的代价是**权限**。RBAC 与 watch 必须同一次部署到位；
 排障时"什么都没有发生"的第一反应应该是**看控制器有没有真的起来**（这里日志里的 reflector 堆栈是关键线索，而 `0/1 Ready` 的 manager Pod 也早就在提示）。
 
-### 坑 2：事件到底落在哪个 API 组？（观察不一致，已按稳妥方式处理）
+### 坑 2：事件到底落在哪个 API 组？（**当日结论已更正**）
+
+> **更正（事后复核：读源码 + 重看当日命令输出）**
+>
+> 当日把「真集群 `kubectl get events` 能看到事件」当成「记录器落到了 core/v1」的证据，
+> 于是写成「写哪个组受 controller-runtime 内部装配影响」。这个结论是错的，且观察本身是**误归因**：
+>
+> 1. 写哪个组**由代码路径唯一决定，环境不影响**：
+>    `GetEventRecorder` → `lazyRecorder` → `events.Broadcaster.NewRecorder(name)`
+>    → `EventSinkImpl.Create(eventsv1.Event)` = **events.k8s.io/v1**；
+>    `GetEventRecorderFor` → `deprecatedRecorder` → `corev1.EventSource{Component}` = **core/v1**。
+> 2. `kubectl get events` 的默认视图是 **core/v1**。Deployment 每次扩缩容，
+>    kube-controller-manager 都会往 core/v1 写 `ScalingReplicaSet` / `SuccessfulCreate`
+>    （`source.component=deployment-controller`）——看到的是别人的事件。
+> 3. 当日还有一条现成反证被忽略了：`kubectl get events --field-selector reason=Scaled` 返回
+>    **No resources found**。若我们的 `Scaled` 真写在 core/v1，这条命令一定会看到东西。
+>
+> 正确判定方式——看**归属字段**，不看“有没有事件”：
+>
+> ```bash
+> # 我们的（events.k8s.io/v1）
+> kubectl get events.v1.events.k8s.io -n default \
+>   -o custom-columns=REASON:.reason,ACTION:.action,CTRL:.reportingController,INST:.reportingInstance
+> # 默认视图（core/v1）
+> kubectl get events -n default -o custom-columns=REASON:.reason,COMP:.source.component
+> ```
+>
+> `reportingController`（或 `source.component`）等于 `shortlink` 的才是我们发的。
+>
+> 处理结论不变（**两组都授权**），但理由换了：不是「不知道写哪个」，而是
+> 「确证写 events.k8s.io，core/v1 作为防御性冗余，用以消除整类『事件被 403 丢光而无人发现』的故障」。
+> 附带一层：403 并非全静默——client-go 会在后台 goroutine 用 klog 打 `Unable to write event`，
+> 重试上限后才丢弃；不影响功能、只影响可观测性，所以“没人看日志”=“没有”。
+
+<details>
+<summary>以下为当日原始记录（结论已被上方更正，保留以便对照）</summary>
 
 迁移到 `mgr.GetEventRecorder`（新事件 API）后：
 
@@ -117,6 +152,8 @@ kubectl logs ... | grep -c "Updating Deployment"      # → 0
 **这一换有真实风险**：若实际写的是 core/v1，事件会被 API Server 以 Forbidden 静默拒绝——**事件丢失是最难发现的一类故障**（它不影响功能，只影响可观测性）。
 
 处理：**两组都授权**。并把"我不知道到底写哪个"这件事写进注释，而不是猜一个。
+
+</details>
 
 ## 六、遗留
 

@@ -85,6 +85,15 @@ type ShortlinkReconciler struct {
 	// 这里用的是 **events.k8s.io/v1** 的新事件 API（`mgr.GetEventRecorder`）；
 	// 旧版 `GetEventRecorderFor` 写 core/v1 Event 且已被标记 deprecated——staticcheck 会报，
 	// 迁过来顺带把 RBAC 的组也换成了 events.k8s.io（见下方 marker）。
+	//
+	// 写哪个 API 组**由代码路径唯一决定，不由环境决定**（读源码可证）：
+	//
+	//	GetEventRecorderFor → deprecatedRecorder  → corev1.EventSource{Component}      → core/v1
+	//	GetEventRecorder    → lazyRecorder       → events.Broadcaster.NewRecorder(name)
+	//	                                          → EventSinkImpl.Create(eventsv1.Event) → events.k8s.io/v1
+	//
+	// 所以这里必然写 events.k8s.io/v1；reportingController = "shortlink"，
+	// reportingInstance = "shortlink-<hostname>"。
 	Recorder recorder.EventRecorder
 }
 
@@ -96,9 +105,14 @@ type ShortlinkReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services/status,verbs=get
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
-// 同时授权 core/v1 events：实测集群里事件落在了 core/v1（而 envtest 里能在 events.k8s.io/v1 查到），
-// 说明"记录器写哪个 API 组"受 controller-runtime 内部装配影响。两组都授，避免因实现细节
-// 导致事件被 API Server 以 Forbidden 静默拒绝（事件丢失是最难发现的一类故障）。
+// 同时授权 core/v1 events 属**防御性冗余**，不是因为我们真的写它：
+// Day 7 曾在真集群看到 `kubectl get events`（默认读 core/v1）里有事件，据此以为记录器落到了 core/v1——
+// 那是误归因：Deployment 扩缩容时 kube-controller-manager 必写 core/v1 事件
+// （ScalingReplicaSet / SuccessfulCreate，source.component=deployment-controller|replicaset-controller）。
+// 判定归属只看一个字段：core/v1 的 .source.component、events.k8s.io/v1 的 .reportingController 是否为 "shortlink"。
+// 两组都保留：多授一份几乎无风险的权限（审计面略大），换掉"事件被 403 丢光而无人发现"这一类故障。
+// 注意：403 不是完全静默——client-go 在后台 goroutine 里 klog 打 "Unable to write event"，
+// 重试上限后才丢弃；不影响功能，只影响可观测性，所以没人看日志就等于没有。
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
