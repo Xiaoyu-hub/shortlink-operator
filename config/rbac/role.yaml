@@ -73,12 +73,6 @@ rules:
 - apiGroups:
   - shortlink.dev
   resources:
-  - shortlinks/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - shortlink.dev
-  resources:
   - shortlinks/status
   verbs:
   - get

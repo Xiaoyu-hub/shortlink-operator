@@ -99,7 +99,9 @@ type ShortlinkReconciler struct {
 
 // +kubebuilder:rbac:groups=shortlink.dev,resources=shortlinks,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=shortlink.dev,resources=shortlinks/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=shortlink.dev,resources=shortlinks/finalizers,verbs=update
+// 注意：这里刻意没有 shortlinks/finalizers 的授权。本项目不持有任何外部资源（DNS 记录、云上 bucket 之类），
+// 删 CR 时没有任何东西需要在进程里清理，所以不调用 AddFinalizer——
+// 「用不上的权限就不要申请」是 Day 18 的审计结论，别把脚手架带的那一行当默认值留着。
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
