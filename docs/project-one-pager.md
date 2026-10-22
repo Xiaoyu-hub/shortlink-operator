@@ -100,15 +100,20 @@ kubectl apply ──► Shortlink(CR)  spec: image / replicas / port / serviceTy
 ## 5 分钟本地复现
 
 ```bash
-# 单元/集成（envtest 真跑 manager，11 specs）
+# 一条命令：apply CR → 三件套 → 自愈 → 拉回偏移 → 滚动 → 级联回收（16 项断言）
+bash hack/demo-v1.sh
+# 镜像已在集群里可跳过构建
+SKIP_BUILD=1 bash hack/demo-v1.sh
+
+# 单元/集成（envtest 真跑 manager，14 个 spec）
 go test ./internal/controller/... -count=1
 
-# 真集群演示（k3d）
+# 真集群手工分步（k3d）
 hack/build-local-image.sh operator-demo          # 离线交叉编译 + 导入镜像
-kubectl config use-context k3d-operator-demo
-make deploy IMG=shortlink-operator:dev
-kubectl apply -f config/samples/shortlink_v1alpha1_shortlink.yaml
-kubectl get sl                                   # READY / REPLICAS / GENERATION / OBSERVED / URL
+kubectl --context k3d-operator-demo apply -k config/crd
+kubectl --context k3d-operator-demo kustomize config/default | sed 's|controller:latest|shortlink-operator:dev|' | kubectl --context k3d-operator-demo apply -f -
+kubectl --context k3d-operator-demo apply -f config/samples/shortlink_v1alpha1_shortlink.yaml
+kubectl --context k3d-operator-demo get sl       # READY / REPLICAS / GENERATION / OBSERVED / URL
 
 # 取证探针（对着真 apiserver 压实验，本项目所有"实测"结论的来源）
 go run ./hack/defaulting-probe                   # 默认值/分配值、no-op 写、SSA 字段所有权
@@ -117,5 +122,7 @@ go run ./hack/finalizer-probe                    # finalizer/删除对 generatio
 
 ## 状态
 
+- **v1 已收口（Day 1–20）**：v2（FaultInjection）/ v3 剩余项（webhook、Helm、博客）明确不做，理由见 ROADMAP「收口决定」
 - `main` 分支 CI 三个 job 全绿：**Lint / Tests(含 envtest) / E2E(真 kind 集群)**
-- 文档：`docs/day01…day08` 逐日交付记录，含**勘误章节**（实测推翻自己先前结论的地方）
+- 一条命令跑完 v1 闭环：`bash hack/demo-v1.sh`（16 项断言）
+- 文档：`docs/day02…day10` 逐日交付记录 + `docs/day18-19-v1-acceptance.md`（级联回收实测、RBAC 审计、一键演示）

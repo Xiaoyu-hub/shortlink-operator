@@ -16,6 +16,22 @@
 
 被管理对象 = 项目一的短链服务；两个项目讲同一个故事，叙事闭环。
 
+### 收口决定（2026-10-22）
+
+**本项目做到 v1（Day 1–20）即停止**，v2 / v3 不做。理由：
+
+1. v1 是一个自洽的交付面——`apply CR → 三件套 → 自愈 → 滚动 → 级联回收` 能一条命令演示（`hack/demo-v1.sh`，16 项断言），
+   面试叙事（“生产侧”）已经站得住；v2/v3 是往同一段上挂的加号。
+2. v3 里价值最高的三项已经提前完成：metrics（Day 31）、leader election（Day 34，含 `ReleaseOnCancel`）、
+   CI 三 job（Day 37）。剩下未做的是 webhook（Day 35–36）、Helm 发布（Day 38）、博客（Day 39），
+   都是“一天开不了头”的活。
+3. v2（Day 21–30）投入最大、与项目一重叠最多——故障演练这个闭环项目一已经手动跑过，
+   再包成 CRD 是工程化练习，不是新故事。
+
+停止前补齐的三个遗留（详见 `docs/day18-19-v1-acceptance.md`）：
+级联回收实测（2.75–3.09s）、RBAC 审计（删掉用不上的 `shortlinks/finalizers` 授权，0 forbidden）、
+一键演示脚本（`hack/demo-v1.sh`）。
+
 ---
 
 ## 一、四十日计划
@@ -238,27 +254,30 @@
 
 ```
 项目名称：基于 kubebuilder 的 Kubernetes Operator —— 短链服务声明式管理 + 故障自愈（个人学习项目）
-时间：2026.10 - 2026.11
-技术栈：Go · Kubernetes · Kubebuilder/controller-runtime · CRD · envtest · kind · GitHub Actions
+时间：2026.10
+技术栈：Go · Kubernetes · Kubebuilder/controller-runtime · CRD · envtest · kind/k3d · GitHub Actions
 
-- 用 kubebuilder 从零开发 Kubernetes Operator（CRD + 控制循环 + 自愈）：
-  控制器调和 Deployment/Service/HPA，Pod 异常 30 秒内自动恢复，镜像变更自动滚动更新
-- 设计 FaultInjection CRD 实现声明式故障演练（CPU/延迟注入），
-  把项目一的手动故障注入脚本升级为"配置即演练"，与监控告警形成闭环
-- 编写 envtest 集成测试（真实 API server）覆盖创建/更新/删除/自愈/幂等场景，
-  GitHub Actions 门禁 lint + 单测 + 镜像构建 + release 全自动
-- Operator 自身暴露 metrics/事件并接入 Prometheus 告警；
-  leader election 保证多副本单主调和；validating webhook 拒绝非法 CR
-- 撰写技术博客《用 kubebuilder 写一个会自愈的短链服务》（X 字，平台阅读量 XXX）
+- 用 kubebuilder 从零开发 Kubernetes Operator（CRD + 控制循环 + 自愈）：控制器调和 Deployment/Service/HPA，
+  子资源被删 3 秒内重建、被手改毫秒级拉回，改 spec 自动滚动（maxUnavailable=0 零中断）
+- 用 envtest（真 apiserver+etcd、真跑 manager）写 14 个集成测试，覆盖创建/更新/删除/自愈/幂等零写入/
+  冻结/失败可见化/HPA 让位；GitHub Actions 上 Lint + Tests + E2E（kind）三个 job 门禁
+- Operator 自身暴露 metrics 与事件、开启 leader election（多副本单主，租约追踪实测 1~2 秒接管），
+  RBAC 收敛到 5 类资源最小集（`can-i get secrets` 为 no，运行日志 0 forbidden）
+- 把「零写入幂等」「级联回收」「滚动零中断」变成可复跑的证据：`hack/demo-v1.sh` 一条命令 16 项断言，
+  `hack/*-probe` 探针压实测结论（APIServer 默认值、no-op 写、字段所有权）
 ```
+
+> 诚实边界（写进简历而不藏）：**没有 webhook**（校验用 CRD OpenAPI schema + CEL）、
+> **没有迁到 Server-Side Apply**（手写 diff + HPA「让位」）、**没有 FaultInjection CRD**（v2 未做）、
+> **没有镜像发布流水线**（CI 只做 lint/test/e2e）。这几个“没做”在面试里是加分项——主动说得出差距。
 
 ### 写法要点
 
 1. **用动词开头**：「用 kubebuilder 开发」「设计」「编写」「实现」「撰写」
-2. **量化数字**：30 秒自愈、三件套（Deployment/Service/HPA）、用例覆盖几态、博客字数
+2. **量化数字**：子资源 3 秒重建、14 个 envtest spec、16 项一键断言、5 类 RBAC 资源
 3. **绑定工具到动作**：不是孤立列「CRD、envtest」，而是「用 envtest 写覆盖自愈的集成测试」「用 ownerReference 实现级联回收」
 4. **诚实定位**：标题写「个人学习项目」；Operator 是应届生简历里稀缺条目，但要经得起追问
-5. **链接齐全**：GitHub 仓库 + 博客链接 + 录屏/截图（自愈录屏是最硬的证据）
+5. **链接齐全**：GitHub 仓库（README 里带一键复现脚本与实测数字表）；有录屏更好（删 Deployment 自愈最直观）
 
 ### 简历项目放置位置
 
@@ -324,17 +343,28 @@
 
 ---
 
-## 附：检查清单（项目交付前自检）
+## 附：检查清单（v1 收口自检，2026-10-22）
 
-- [ ] 全新 kind 集群能从零一键安装 operator + 三阶段 demo 复现
-- [ ] `make test`（envtest）全绿，覆盖创建/更新/删除/自愈/幂等场景
-- [ ] 自愈演示录屏：`kubectl delete pod` 后 30 秒内 readyReplicas 恢复
-- [ ] 滚动更新验证：改 CR image → Deployment 滚动且服务零中断
-- [ ] FaultInjection 演示录屏：CPU/延迟注入 → 项目一告警点燃 → 恢复后熄灭
-- [ ] `docs/fault-matrix.md`：声明式演练逐条覆盖项目一手动脚本
-- [ ] operator `/metrics` 被项目一 Prometheus 抓到，Grafana 有面板
-- [ ] leader election 双副本 kill 主验证过（日志 + 行为证据）
-- [ ] validating webhook 拒收非法 CR，有 envtest 测试覆盖
-- [ ] GitHub Actions 全绿：lint + vet + test + 构建 + release
-- [ ] README 有架构图 / 三阶段快速开始 / 已知限制；博客已发布（带链接）
-- [ ] 简历条目按模板写好；三项目叙事（消费 → 决策 → 平台）讲 5 分钟不卡壳
+已完成（带证据）：
+
+- [x] 全新 k3d 集群能从零一键安装 operator 并跑完 v1 闭环（`hack/demo-v1.sh`，16 项断言全 PASS）
+- [x] envtest 全绿，覆盖创建/更新/删除/自愈/幂等零写入/冻结/失败可见化/HPA 让位（14 个 spec）
+- [x] 自愈验证：删 Deployment 后 3 秒内重建（脚本口径：回到就绪约 8 秒）
+- [x] 滚动更新验证：改 CR spec 触发滚动，`maxUnavailable=0` 时压测探针 0 次被拒
+- [x] 级联回收：删 CR 后 Deployment 0.4s / Service 0.5s / Pod 2.8s 消失
+- [x] leader election 双副本 kill 主验证（优雅 1–2s，`kill -9` 约 20s）
+- [x] RBAC 收敛到 5 类资源最小集，运行日志 0 forbidden
+- [x] GitHub Actions 全绿：Lint + Tests（含 envtest）+ E2E（kind）
+- [x] README 有架构图 / 能力边界 / 实测证据表 / 快速开始 / 已知限制
+- [x] 简历条目按模板写好
+
+明确不做（不在本文交付面内）：
+
+- [ ] FaultInjection 演示（v2，Day 21–30）
+- [ ] `docs/fault-matrix.md`（v2，Day 27）
+- [ ] operator `/metrics` 接项目一 Prometheus + Grafana 面板（v3，Day 33）
+- [ ] validating / defaulting webhook（v3，Day 35–36）
+- [ ] CI 构建镜像 + release（v3，Day 38）
+- [ ] 技术博客（v3，Day 39）
+- [ ] 录屏（自愈 / 滚动 / 级联回收）——交付前有条件就补
+
