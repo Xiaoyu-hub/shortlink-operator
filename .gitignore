@@ -37,3 +37,9 @@ vendor/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --- AI agent 约束文件（不入公开仓库）---
+# 内容含个人面试到分、短板与进度，统一放在 sre-drill-rules 仓库
+AGENTS.md
+CLAUDE.md
+DRILL-RULES.md
