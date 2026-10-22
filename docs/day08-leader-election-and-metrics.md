@@ -141,7 +141,141 @@ rest_client_requests_total{code="201",method="POST"}  2     ← 与基线相同�
 
 顺带修正 `docs/day05` 第九节的一句错话（"CI（Linux）无此问题"）——实测 CI 踩的是**同一个** ENVTEST_VERSION 坑，而且根因不是网络而是 replace。
 
-## 六、遗留
+## 六、概念补遗：租约时间账、Lease 对象、分区与返回码
+
+> 这一节是出题后回填的。把「三个参数的户口本 / 谁在什么时刻读 / 分区时到底多久自尽 / Lease 对象长什么样」逐条钉到源码行号上，含两处勘误（6.7）。
+> 代码引用版本：`k8s.io/client-go v0.37.0`（`tools/leaderelection/leaderelection.go`、`resourcelock/leaselock.go`）、`sigs.k8s.io/controller-runtime v0.25.0`（`pkg/leaderelection/leader_election.go:102-108`）。
+
+### 6.1 三个参数的户口本
+
+| 参数 | 值 | 谁写 | 谁读 | 语义 |
+|------|----|------|------|------|
+| `LeaseDuration` | 15s | holder 写进 Lease 的 `spec.leaseDurationSeconds`（`leaderelection.go:447-452`） | **别人** | 「多久没心跳算你死」。不是任何进程的定时器 |
+| `RenewDeadline` | 10s | 不落任何对象 | **只有 leader 自己** | 「从最后一次成功续租起，连续 10s 一次都没续上就认输」 |
+| `RetryPeriod` | 2s | 不落 | 两边都用 | 竞争者轮询周期（**有 jitter**）；leader 续租间隔（**无 jitter**） |
+
+默认值来自 `third_party/controller-runtime/pkg/manager/manager.go:54-56`；启动校验 `leaderelection.go:77-82`：
+`LeaseDuration > RenewDeadline > RetryPeriod * JitterFactor(1.2)`。不满足直接 error，manager 起不来。
+
+**`RenewDeadline < LeaseDuration` 不是凑数**：10 < 15 造出 5 秒余量，保证「旧 leader 已经自尽、新 leader 还不许上桌」，即宁空窗不双主。
+
+### 6.2 竞争者：滑动的 `observedTime`，「读」不等于「抢」
+
+- 入口 `acquire()`（`:252-276`）是 `wait.JitterUntilWithContext(..., RetryPeriod, JitterFactor, true)`：**immediate + sliding**，进程一启动就跑第一次，之后每 `Jitter(2s,1.2)` 跑一次，**永不停止**直到抢到。不存在「等 15 秒才开始看」。
+- 能不能抢的判据是**滑动的本地计算**（`:548-554`）：`observedTime + leaseDurationSeconds > now` 算有效。
+  `observedTime` 是**本机读到这条记录的时刻**（不是 leader 写的时刻），只在记录的 `spec` 序列化字节变化时刷新（`:487-491`；`leaselock.go:42-54` 用 `json.Marshal` 做 raw 比较）。
+- 所以正常续租期间，每个副本读到的心跳都会把自己的 `observedTime` 往前推 ⇒ 过期判断永远为假 ⇒ 它们一直在读、一直在试，但每次都 `return false`。
+- 判定用的 `leaseDurationSeconds` 取自**记录里那个值**（旧 leader 当年写的），不是自己的配置 ⇒ 滚动升级新旧混跑不会因为配置不同而互判过期。
+- 抢的实质是一次**带 resourceVersion 的 PUT**（`:497-511`）：谁先把自己的身份写进 `holderIdentity` 谁赢，其余人 409 → `false` → 下个周期再来。没有锁服务、没有选主协议，只有一条 Lease 记录的 CAS。
+
+### 6.3 leader：2s 固定节拍 + 10s 预算 + 5s 单请求超时
+
+`renew()`（`:279-312`）是两层循环：
+
+```go
+wait.UntilWithContext(ctx, func(ctx context.Context) {                 // 外层：固定 2s，jitter=0
+    err := wait.PollUntilContextTimeout(ctx, RetryPeriod, RenewDeadline, true, func(ctx context.Context) (bool, error) {
+        if err := ctx.Err(); err != nil { return false, err }          // 优雅退出时短路，避免多发一次无用 PUT
+        return le.tryAcquireOrRenew(ctx), nil
+    })
+    if err == nil { return }                                           // 续上了
+    le.metrics.leaderOff(...); logger.Info("Failed to renew lease", ...); cancel()
+}, le.config.RetryPeriod)
+```
+
+- 正常态：`tryAcquireOrRenew` 走 **fast path 乐观更新**（`:454-467`，用上次缓存的 Lease 对象带 RV 直接 PUT），成功后外层睡 2s 再来 ⇒ 续租间隔 = **2s + 一次 PUT 的 RTT，无 jitter**。
+- 失败态：内层每 2s 重试，10s 窗口内约 5 次，全失败才返回 `context deadline exceeded` → 认输退出。**10s 是整个窗口，不是单次 PUT 超时**（`PollUntilContextTimeout` 内部就是 `context.WithTimeout`，`poll.go:45-49`）。
+- **单请求还有一层超时**：controller-runtime 给 leader-election 用的 client 单独设了 `config.Timeout = max(RenewDeadline/2, 1s) = 5s`（`pkg/leaderelection/leader_election.go:102-108`，注释写明「防止单个挂起请求吃掉整次 leader 判定」）。这一层决定了黑洞分区的自尽时刻是 12s 而不是更久。
+
+### 6.4 三条时间轴（t0 = 最后一次成功续租）
+
+```
+① kill -9 / OOMKilled / 节点掉电：进程什么都没做，没有 t0+10 事件
+t0        t0+2   t0+4                     t0+15         t0+19.4
+│          ✗     ✗                       │             │
+续租成功   进程已死                       └─ 最早可抢 ──┴─ 最晚可抢
+                                           （T_obs+15，T_obs∈(t0,t0+4.4]）
+
+② 进程活着但续不上
+   a. 快速失败（RST / refused / 403 / 5xx / 409）：
+      t0+2,4,6,8 各试一次全失败 → 10s 窗口到期 → t0+10 自尽
+   b. 黑洞（丢包不回 RST）：
+      单次 PUT 卡 5s（config.Timeout）→ t0+7 第一次报 i/o timeout → t0+9 再试 → t0+12 被 poll 窗口掐断 → 自尽
+   两种都不需要网络恢复；两侧共用 5s 余量：自尽(≤12s) < 可抢(≥15s)
+
+③ 优雅退出（kubectl delete pod → SIGTERM）
+t_sigterm      +ε                     +≤4.4
+tryRelease 写 holder="" + leaseDurationSeconds=1 → 待命副本下一个 tick 抢到（实测 1~2s）
+```
+
+`tryRelease`（`:341-347`）是双保险：空 holder 让 `len(holder) > 0` 判据直接失效，`leaseDurationSeconds=1` 让按时间也立刻过期；冲突时递归重试（`:348-355`）。
+
+### 6.5 Lease 对象本身
+
+```yaml
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: 6c1ecb47.shortlink.dev      # = cmd/main.go 的 LeaderElectionID
+  namespace: shortlink-system
+spec:
+  holderIdentity: "<pod名>_<uuid>"   # hostname + "_" + uuid，每次进程重启都变
+  leaseDurationSeconds: 15
+  acquireTime: "..."                 # 只在抢占时刷新，续租保留旧值
+  renewTime: "..."                   # 每次续租刷新，MicroTime 精度（保证每次字节都不同）
+  leaseTransitions: 3                # 只在抢占时 +1
+```
+
+四条性质：
+
+1. 内置资源（`coordination.k8s.io/v1`），**与 Shortlink CRD 无关**，普通存在 etcd 里。
+2. **没有 TTL、没有服务端过期、没有 ownerReference、不会被 GC**。apiserver 永远不会因为「过期」改它或删它——**过期纯由客户端算**（6.2 那条判据）。它与 etcd 的 lease（真 TTL）只是重名。
+3. 写入只有三个时机（`resourcelock/leaselock.go`）：`Create`（`:57-70`，谁先建谁当）、`Update`（`:73-96`，续租/抢占/release 共用，实现是 PUT + 缓存 RV）、`Get`（`:42-54`）。
+4. `became leader` / `stopped leading` 记成 **Event（`reason=LeaderElection`，挂在 Lease 对象上）**（`:99-109`）；RBAC 需要 `leases` 的 `get/create/update` + `events` 的 `create/patch`。
+
+观测口径：`renewTime` 在动 = 活着；冻住但 < 15s = 别人抢不到（正常空窗）；冻住且 > 15s = 该有人接手了。`leaseTransitions` 在涨 = leadership 在反复易手（抖动），应进自监控。
+
+### 6.6 续租 PUT 各种返回码的语义
+
+| 返回 | 原因 | 后果 |
+|------|------|------|
+| 200 | 正常续租 | 继续当 leader |
+| 409 Conflict | 缓存 RV 过期（被抢占 / 被 release / 手工改过） | 回落 slow path 重新 GET；holder≠自己 → false；10s 全 false → 自尽 |
+| 403 | RBAC 缺 `leases/update`（或 SA 被换） | 每 2s 失败 → 自尽 → 重启后 acquire 也 403 → CrashLoop |
+| 401 | 凭据失效（token 轮换异常） | 同上 |
+| 404 | Lease 被删 | 走 GET→Create 分支，Create 成功即**立刻**重新当上 leader（`:476-483`） |
+| 5xx / etcd 慢 | apiserver 侧 | 视 10s 窗口内是否还有一次成功 |
+| `i/o timeout` / `context deadline exceeded` | 分区、黑洞 | 见 6.4 ② |
+
+实现细节：**这些原因在 `renew` 里全被折叠成 `false`**（`tryAcquireOrRenew` 只返回 bool），只有 poll 窗口到期才升级成 error。所以日志只有一条 `Failed to renew lease`，真正的返回码要看审计日志或临时开 `-v=6`——这也是为什么排这类故障，`renewTime` 的停滞时长比日志更好用。
+
+### 6.7 两处勘误
+
+1. **轮询 jitter 的上限是 4.4s，不是 2.4s。** 先前口头结论「`Jitter(2s,1.2) ∈ [2.0,2.4)`」是错的：`Jitter(d,f) = d + rand*f*d`（`apimachinery/pkg/util/wait/wait.go:92-98`），`f=1.2` 是 **+120%**，不是 +20%。本机实测 10 万次：`min 2.000015852s / max 4.39999994s / avg 3.199237051s`。
+   ⇒ 竞争者轮询间隔 ∈ **[2.0, 4.4)s（均值 3.2s）**；抢占窗口 ∈ **[t0+15, t0+19.4)**。
+   ⇒ 2.2 节实测的 **20s** 反而更顺了：15s 固定成本 + 最多 4.4s 观测/轮询滞后 + Pod 删除与启动开销。
+2. **「分区后要等网络恢复才知道自己续租失败」是错的。** 续租是有返回码的 HTTP PUT：快速失败毫秒级知道，黑洞靠 `config.Timeout=5s` + `RenewDeadline=10s`，**≤12s 必然自尽**，不需要网络恢复。
+   要等网络恢复（或重启）才会发生的，是另一件事：**看到 `holderIdentity` 已经换成别人**。旧 leader 自尽时既不知道新 leader 是谁，也不需要知道。
+
+### 6.8 真正的双主来自「冻结」，不来自分区
+
+一条可证伪的推论：续租是 PUT 到同一个 apiserver，写 status 也是 PUT 到同一个 apiserver。
+
+> **如果旧 leader 还能写 status，它的续租 PUT 也该能成功 ⇒ 它仍合法持有租约（`observedTime` 一直被刷新）⇒ 别人抢不到。**
+
+因此**纯网络分区不会产生「旧 leader 继续写脏」**：要么续得上（合法 leader），要么续不上（≤12s 自尽）。
+
+会产生双主的是**进程没有被调度去检查 ctx**：`SIGSTOP`、cgroup freezer、VM 挂起/迁移、极端 CPU 饿死、`io hang`、Go 死锁、cgo 长时间阻塞。Go 的定时器与 context 到期都依赖 goroutine 被调度，进程被冻结时「10 秒到了」这件事没有执行者；解冻瞬间 reconcile goroutine 可能先于 leader election 拿到 CPU，用「我还是 leader」的缓存视角写一次 status，而新 leader 已在工作。**leader election 是 liveness 机制 + 最优努力的 safety，不是 fencing token**，最终兜底仍是 level-triggered 幂等（写前 `DeepEqual`、`Status().Patch(MergeFrom(old))`、只写能用最新真值算出的字段）。
+
+取证三步（区分分区 / 冻结）：
+
+1. `kubectl get lease -o yaml` 看 `renewTime` 是否有 **>15s 的 gap**；
+2. 比对**新 leader 的 `acquireTime`** 与旧进程退出/最后一条日志的时间戳：`acquireTime` 更早 ⇒ 有过双主窗口（真事故），更晚 ⇒ 干净交接；
+3. 旧进程日志：有 `Failed to renew lease ... context deadline exceeded` ⇒ **它知情**（分区/慢 API/403）；日志里什么都没有、Pod 却活着且 `leaseTransitions` +1 ⇒ **冻结/死锁**（它没机会打印）。
+
+另一个高频场景：**apiserver 慢**（p99 > 5s）。`config.Timeout=5s` 会让单次续租报 `i/o timeout`，但只要 10s 窗口内有一次成功，leadership 就保住——表现是日志断续报错而**不换代**；只有慢到 10s 内 0 次成功才自尽重启，形成「反复换代 + 反复重启」，`leaseTransitions` 肉眼可见地涨。
+
+## 七、遗留
 
 | # | 事项 |
 |---|------|
