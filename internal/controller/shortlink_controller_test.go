@@ -49,6 +49,9 @@ const (
 	// 测试里反复出现的镜像与"升级后"的镜像，提成常量（goconst）。
 	defaultImage  = "ghcr.io/xiaoyu-hub/shortlink:v0.1.0"
 	upgradedImage = "ghcr.io/xiaoyu-hub/shortlink:v0.2.0"
+	// 隔离用例里 A 的第二跳镜像：故意与 upgradedImage 不同，
+	// 这样"B 没被改"不能靠"两边镜像本来就一样"蒙过去。
+	aUpgradedImage = "ghcr.io/xiaoyu-hub/shortlink:v0.3.0"
 )
 
 var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
@@ -624,6 +627,92 @@ var _ = Describe("Shortlink controller（envtest 真控制循环）", func() {
 			}, 2*time.Second, interval).Should(Equal("25%"))
 		})
 	})
+
+	// Day 17 的两件事是分开的：幂等解决「同一个 CR 被反复调和」，隔离解决「多个 CR 同时被调和」。
+	// 串味的典型来源有三个：拿包级变量/共享缓冲构造期望、按宽 selector 去 List 别人的子资源、
+	// 用 CR 名字之外的键去定位子对象。本项目这三条都没踩（期望构造是纯函数、子对象按名字 Get），
+	// 但「没踩」只能算当场的观察——这条用例把它钉成可执行断言。
+	Context("隔离：两个 CR 并行调和互不污染", func() {
+		It("各自只写自己的子资源；改 A 的镜像、删 B 的 Deployment 都不影响对方", func() {
+			const (
+				nameA = "isolation-a"
+				nameB = "isolation-b"
+			)
+
+			Expect(k8sClient.Create(ctx, newTestShortlink(nameA, func(s *shortlinkv1alpha1.Shortlink) {
+				s.Spec.Replicas = new(int32(1))
+			}))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newTestShortlink(nameB, func(s *shortlinkv1alpha1.Shortlink) {
+				s.Spec.Replicas = new(int32(3))
+				s.Spec.Image = upgradedImage
+				s.Spec.Env = []corev1.EnvVar{{Name: "SHORTLINK_B_INSTANCE", Value: "b"}}
+			}))).To(Succeed())
+
+			for _, name := range []string{nameA, nameB} {
+				var d appsv1.Deployment
+				Eventually(func() error {
+					return k8sClient.Get(ctx, objectKey(name), &d)
+				}, timeout, interval).Should(Succeed())
+				var svc corev1.Service
+				Eventually(func() error {
+					return k8sClient.Get(ctx, objectKey(name), &svc)
+				}, timeout, interval).Should(Succeed())
+			}
+
+			By("每个子资源的 owner 是各自的 CR，selector 只指向自己——串味会先在这里暴露")
+			Expect(deploymentOwnerName(nameA)).To(Equal(nameA))
+			Expect(deploymentOwnerName(nameB)).To(Equal(nameB))
+			Expect(serviceOwnerName(nameA)).To(Equal(nameA))
+			Expect(serviceOwnerName(nameB)).To(Equal(nameB))
+			Expect(deploymentSelectorLabels(nameA)).To(HaveKeyWithValue(labelInstance, nameA))
+			Expect(deploymentSelectorLabels(nameB)).To(HaveKeyWithValue(labelInstance, nameB))
+
+			By("三处刻意不同的 spec（副本数/镜像/env）必须原样落在各自的 Deployment 上")
+			Expect(deploymentSpecReplicas(nameA)).To(Equal(int32(1)))
+			Expect(deploymentSpecReplicas(nameB)).To(Equal(int32(3)))
+			Expect(deploymentImage(nameA)).To(Equal(defaultImage))
+			Expect(deploymentImage(nameB)).To(Equal(upgradedImage))
+			Expect(deploymentEnv(nameB)).To(Equal([]corev1.EnvVar{{Name: "SHORTLINK_B_INSTANCE", Value: "b"}}))
+
+			By("记下 B 的 resourceVersion，然后只改 A 的镜像")
+			bRVBefore := deploymentResourceVersion(nameB)
+			Expect(bRVBefore).NotTo(BeEmpty())
+			Eventually(func() error {
+				var s shortlinkv1alpha1.Shortlink
+				if err := k8sClient.Get(ctx, objectKey(nameA), &s); err != nil {
+					return err
+				}
+				s.Spec.Image = aUpgradedImage
+				return k8sClient.Update(ctx, &s)
+			}, timeout, interval).Should(Succeed())
+			Eventually(func() string {
+				return deploymentImage(nameA)
+			}, timeout, interval).Should(Equal(aUpgradedImage))
+
+			By("B 的 Deployment 必须一个字节都没动过：RV 不变（RV 变 = 有人写过它）")
+			Consistently(func() string {
+				return deploymentResourceVersion(nameB)
+			}, 2*time.Second, interval).Should(Equal(bRVBefore))
+			Expect(deploymentSpecReplicas(nameB)).To(Equal(int32(3)))
+			Expect(deploymentImage(nameB)).To(Equal(upgradedImage))
+
+			aRVAfter := deploymentResourceVersion(nameA)
+			bUID := deploymentUID(nameB)
+
+			By("删 B 的 Deployment：应由 B 自己重建（UID 变化），期间 A 不被触碰")
+			var bDeploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, objectKey(nameB), &bDeploy)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &bDeploy)).To(Succeed())
+			Eventually(func() bool {
+				return deploymentUID(nameB) != bUID
+			}, timeout, interval).Should(BeTrue())
+
+			Consistently(func() string {
+				return deploymentResourceVersion(nameA)
+			}, 2*time.Second, interval).Should(Equal(aRVAfter))
+			Expect(deploymentImage(nameA)).To(Equal(aUpgradedImage))
+		})
+	})
 })
 
 // ---- 测试辅助 ----
@@ -725,6 +814,61 @@ func readyReason(name string) string {
 		}
 	}
 	return ""
+}
+
+// deploymentOwnerName 读 Deployment 的 controller ownerRef 名字（没有则空串）。
+func deploymentOwnerName(name string) string {
+	var d appsv1.Deployment
+	if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil {
+		return ""
+	}
+	for _, ref := range d.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller {
+			return ref.Name
+		}
+	}
+	return ""
+}
+
+// serviceOwnerName 读 Service 的 controller ownerRef 名字（没有则空串）。
+func serviceOwnerName(name string) string {
+	var svc corev1.Service
+	if err := k8sClient.Get(ctx, objectKey(name), &svc); err != nil {
+		return ""
+	}
+	for _, ref := range svc.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller {
+			return ref.Name
+		}
+	}
+	return ""
+}
+
+// deploymentEnv 读容器 env（读不到时返回 nil）。
+func deploymentEnv(name string) []corev1.EnvVar {
+	var d appsv1.Deployment
+	if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil || len(d.Spec.Template.Spec.Containers) == 0 {
+		return nil
+	}
+	return d.Spec.Template.Spec.Containers[0].Env
+}
+
+// deploymentResourceVersion / deploymentUID 用于"这个对象有没有被人写过"。
+// RV 是唯一能证明"真的没写"的客户端可见信号——只比值可能被 API Server 的 dedupe 骗到。
+func deploymentResourceVersion(name string) string {
+	var d appsv1.Deployment
+	if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil {
+		return ""
+	}
+	return d.ResourceVersion
+}
+
+func deploymentUID(name string) types.UID {
+	var d appsv1.Deployment
+	if err := k8sClient.Get(ctx, objectKey(name), &d); err != nil {
+		return ""
+	}
+	return d.UID
 }
 
 // eventTypesAndReasonsFor 列出作用在该对象上的事件，形如 "Warning/DeploymentReconcileFailed"。
