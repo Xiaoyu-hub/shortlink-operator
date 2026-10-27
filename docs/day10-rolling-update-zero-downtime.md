@@ -102,3 +102,53 @@ metrics-server，这次是 CoreDNS）。前两次用"从另一个节点导出镜
 | 2 | 未归因的残余连接被拒：需要在更高采样率下重复多轮滚动来定位，或直接用抓包/iptables 观察 |
 | 3 | `preStop` 若要引入，应先构造能复现经典场景的实验（慢排空应用或长连接），再决定 |
 | 4 | 本日的探针与实验步骤尚未脚本化（现在只是文档里的命令） |
+
+## 六、面试演练收口（2026-10-26）
+
+小测 5 题均分 82（100/95/55/70/90）通过；正式六题均分 **65**（70/80/62/65/78/63）；
+口述 3 题均分 **68**（70/80/55），一处硬错已订正。结论：收口，进 Day 11。
+
+### 六.1 演练中确立的结论
+
+1. **`maxUnavailable=0` 保证的是「副本数不低于 replicas」，不是「流量路由正确」。** 两者是不同问题，后者靠 `preStop`。
+2. **控制器不做全局最优分配，只做两个各自独立、只看局部约束的单步判断**：扩新 RS 只看「总数 < replicas+maxSurge」，不看旧 RS 有几个可用；缩旧 RS 只看「可用数够不够 replicas-maxUnavailable」。`maxU=0` 锁死「缩旧」，replicas 提升又新开 surge 空间 ⇒ 两个方向同时被用满。**控制器没有「留一个试错就够」的经济性判断**，所以坏镜像会长期吃掉 `replicas+maxSurge` 的容量——这是必须配 `progressDeadlineSeconds` 与告警的原因。
+3. **卡住的 rollout 不会持续重试**：新 Pod 停在 `ErrImagePull` 时状态不再变化 ⇒ 没有 RS 事件 ⇒ 控制器不被唤醒，只能等 resync（默认 10h±jitter）。
+4. **三个「版本号」不能混**：`resourceVersion`（任何写入都可能变）、`metadata.generation`（spec 变才 +1）、`deployment.kubernetes.io/revision`（只在创建新 RS 时 +1）。改 `spec.replicas` ⇒ RV 变、generation 变、**revision 不变**。
+5. **`可用 >= replicas - maxU` 只是设计意图，卡住时会被打破**：实测 replicas=4、maxSurge=1、maxU=0 那轮，总数 5（=4+1 ✓），但实际可用只有 3，低于下限 4。控制器只能尽力，卡在中间态——这正是「需要告警而不是靠不等式反推行为」的理由。
+
+### 六.2 `availableReplicas` 为什么会假绿（三处不看）
+
+它只回答一个问题：Pod 的 `Ready` condition 是否成立。它不看：
+
+1. **探针写得对不对** — readiness 路径 404、只探 TCP 不探业务、`initialDelaySeconds` 过长 ⇒ Ready 与实际可用脱钩。
+2. **流量面** — Endpoints/kube-proxy/ingress 规则未更新、Service selector 未匹配、副本挤在同一节点 ⇒ Ready 但没人给它发流量，或节点挂掉整组不可用。
+3. **进程内部** — 队列积压、下游依赖挂掉、5xx 飙升；只要探针通，照样算 available。原因是探针打的 `/healthz` 与业务链路几乎不重叠：不查库的 healthz 在数据库挂掉时仍返回 200。
+
+**不能靠加强探针解决**：深度探针会让下游抖动变成全体 Unready ⇒ 全线雪崩。正确分工是 readiness 只探「本进程能否服务」，依赖健康交给 metrics + 告警。
+
+### 六.3 零值、omitempty 与 SSA（含一处自我更正）
+
+- `appsv1.Deployment` 的 `MinReadySeconds int32` 带 `omitempty`：值为 0 ⇒ key 消失 ⇒ SSA 视为「不声明」⇒ 原值保留、且**不报错**。
+- `applyconfigurations` 里字段是**指针** `*int32`：`WithMinReadySeconds(0)` 会把 0 写进 JSON。**所以 SSA 表达得了「声明零值」**，表达不了的是「写 null 回退默认」——那要用 `unstructured` 或 `client.RawPatch`。列表字段清空（`env` 3→0）同属后者。
+- 语义三分：`0` = 我声明它是 0；键缺失 = 我不声明；`null` = 清空/回退默认。typed struct 的 `int32` 分不出前两者，这正是 applyconfigurations 全用指针的原因。
+
+**更正**：本文件早前「改 SSA 会破坏无偏移零写入断言（每次 PATCH 都推进 resourceVersion）」的表述**说过头了**。apiserver 在 `GuaranteedUpdate` 有 no-op 优化，内容完全相同的 patch 很可能不推进 RV（未实测）。准确说法是：SSA 下「没发写请求」这个**观测手段**失效（每轮都发 PATCH，与偏不偏移无关），幂等断言本身要改写成「发出去之后 RV / managedFields 没变」。另因 `For + GenerationChangedPredicate`，RV 变而 generation 不变的事件会被 predicate 丢弃，不会自循环。
+
+### 六.4 `applyconfigurations` 的必要性与代价
+
+`client.Apply` 的形参要求 `runtime.ApplyConfiguration`，而 `appsv1.Deployment` 没实现 ⇒ 编译报 `*appsv1.Deployment does not implement runtime.ApplyConfiguration`。必须引 `k8s.io/client-go/applyconfigurations/apps/v1`（字段全为指针 + `With*` 链式）。代价三条：
+
+1. 所有权冲突（`conflict with "kubectl": .spec.replicas`），`client.ForceOwnership` 会踢掉别人的字段归属；
+2. 不可变字段照样被拒（`spec.selector` 仍报 `field is immutable`）；
+3. 零写入断言要改写（见六.3）。
+
+### 六.5 测试为何没抓到 minReadySeconds 被抹回
+
+不是「漏了一个用例」，而是**测试与实现共享了同一个错误假设**：测试的 `desired` 来自我们自己的构造器，构造器不设 `minReadySeconds` ⇒ 0 vs 0 ⇒ 就算比较也发现不了。
+
+正确写法必须从外部注入一个「不该被我们管理的值」：apply 一个手工设 `minReadySeconds: 30` 的 Deployment → 触发一次 rollout → 断言它仍然是 30。
+
+### 六.6 待补
+
+- SLI/SLO 口径（Q10.5 的主要失分点）：SLI 是可测指标不是「可用性」；SLO 带窗口；SLA 是对外合同。P99 看不见错误率——1% 的 500 若耗时极短会落在最快端，P99 反而变好看，所以延迟 SLI 与错误 SLI 必须都看。
+- 「旧 RS 为什么被放到 3 而不是 4」只有机制层解释，**未逐行核实** controller 算法（按深度上限封顶）；要确认需读 `pkg/controller/deployment/rolling.go` 或重跑实验抓 scale 调用日志。
