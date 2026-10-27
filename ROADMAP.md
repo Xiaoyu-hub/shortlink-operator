@@ -32,6 +32,13 @@
 级联回收实测（2.75–3.09s）、RBAC 审计（删掉用不上的 `shortlinks/finalizers` 授权，0 forbidden）、
 一键演示脚本（`hack/demo-v1.sh`）。
 
+收口后又补了一轮（2026-10-26）：
+
+1. `docs/day11-17-mapping.md` —— Day 11–17 的活被折叠进 day5/6/7 的提交，没有逐日文档；
+   这份对账表把每天的落地函数与证据补齐，并把三个真缺口写明。
+2. Day 17 缺失的「两个 CR 并行互不污染」envtest 用例已补（envtest spec 14 → 15）。
+3. 确认 v1 范围内无「写了但没做」的项；两处口径差异（Day 15 删 CR 回收、Day 17 零写入判据）已在同一份文档里说明。
+
 ---
 
 ## 一、四十日计划
@@ -259,7 +266,7 @@
 
 - 用 kubebuilder 从零开发 Kubernetes Operator（CRD + 控制循环 + 自愈）：控制器调和 Deployment/Service/HPA，
   子资源被删 3 秒内重建、被手改毫秒级拉回，改 spec 自动滚动（maxUnavailable=0 零中断）
-- 用 envtest（真 apiserver+etcd、真跑 manager）写 14 个集成测试，覆盖创建/更新/删除/自愈/幂等零写入/
+- 用 envtest（真 apiserver+etcd、真跑 manager）写 15 个集成测试，覆盖创建/更新/删除/自愈/幂等零写入/
   冻结/失败可见化/HPA 让位；GitHub Actions 上 Lint + Tests + E2E（kind）三个 job 门禁
 - Operator 自身暴露 metrics 与事件、开启 leader election（多副本单主，租约追踪实测 1~2 秒接管），
   RBAC 收敛到 5 类资源最小集（`can-i get secrets` 为 no，运行日志 0 forbidden）
@@ -274,7 +281,7 @@
 ### 写法要点
 
 1. **用动词开头**：「用 kubebuilder 开发」「设计」「编写」「实现」「撰写」
-2. **量化数字**：子资源 3 秒重建、14 个 envtest spec、16 项一键断言、5 类 RBAC 资源
+2. **量化数字**：子资源 3 秒重建、15 个 envtest spec、16 项一键断言、5 类 RBAC 资源
 3. **绑定工具到动作**：不是孤立列「CRD、envtest」，而是「用 envtest 写覆盖自愈的集成测试」「用 ownerReference 实现级联回收」
 4. **诚实定位**：标题写「个人学习项目」；Operator 是应届生简历里稀缺条目，但要经得起追问
 5. **链接齐全**：GitHub 仓库（README 里带一键复现脚本与实测数字表）；有录屏更好（删 Deployment 自愈最直观）
@@ -348,7 +355,7 @@
 已完成（带证据）：
 
 - [x] 全新 k3d 集群能从零一键安装 operator 并跑完 v1 闭环（`hack/demo-v1.sh`，16 项断言全 PASS）
-- [x] envtest 全绿，覆盖创建/更新/删除/自愈/幂等零写入/冻结/失败可见化/HPA 让位（14 个 spec）
+- [x] envtest 全绿，覆盖创建/更新/删除/自愈/幂等零写入/冻结/失败可见化/HPA 让位/双 CR 隔离（15 个 spec）
 - [x] 自愈验证：删 Deployment 后 3 秒内重建（脚本口径：回到就绪约 8 秒）
 - [x] 滚动更新验证：改 CR spec 触发滚动，`maxUnavailable=0` 时压测探针 0 次被拒
 - [x] 级联回收：删 CR 后 Deployment 0.4s / Service 0.5s / Pod 2.8s 消失

@@ -211,7 +211,7 @@ v1 收口阶段不做行为变更，这条记进 README 的「已知限制」，
 ## 五、v1 到此为止：范围声明
 
 - **已完成**：CRD（spec/status/CEL 互斥校验）、控制循环（创建/更新/幂等 diff/失败可见化）、
-  service+可选 HPA、滚动策略、自愈、status 子资源、事件（events.k8s.io）、envtest 14 个 spec、
+  service+可选 HPA、滚动策略、自愈、status 子资源、事件（events.k8s.io）、envtest 15 个 spec、
   e2e（kind）、leader election、metrics、CI 三 job（Lint/Tests/E2E）、RBAC 最小化、一键演示、级联回收。
 - **不做**：v2 的 FaultInjection CRD（Day 21–30）、v3 的 webhook / Helm chart / 博客（Day 35–39）。
   理由写在 ROADMAP 的「收口决定」一节：v1 已经是自洽可讲的交付面，v2/v3 是加分项，

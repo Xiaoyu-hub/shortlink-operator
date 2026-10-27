@@ -105,7 +105,7 @@ bash hack/demo-v1.sh
 # 镜像已在集群里可跳过构建
 SKIP_BUILD=1 bash hack/demo-v1.sh
 
-# 单元/集成（envtest 真跑 manager，14 个 spec）
+# 单元/集成（envtest 真跑 manager，15 个 spec）
 go test ./internal/controller/... -count=1
 
 # 真集群手工分步（k3d）

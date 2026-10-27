@@ -26,7 +26,7 @@
 - 滚动更新：`maxSurge` / `maxUnavailable` 透传给 Deployment；改 `spec` 自动滚动
 - HPA：声明 `spec.autoscaling` 后**让位**给 HPA——不再写 `replicas`、不再比它、覆写前搬回
 - 运维面：leader election（多副本单主）、Prometheus metrics、`kubectl get sl` 打印列
-- 测试：envtest 14 个 spec（真跑 manager）+ kind e2e；CI 三 job（Lint / Tests / E2E）全绿
+- 测试：envtest 15 个 spec（真跑 manager）+ kind e2e；CI 三 job（Lint / Tests / E2E）全绿
 
 故意没做的（见「路线图与范围」）：FaultInjection CRD（v2）、validating/defaulting webhook、
 Helm chart、多集群。
@@ -137,8 +137,8 @@ go test ./internal/controller/... -count=1
 bash hack/manifests.sh   # 等价于 make manifests（重生成 CRD / RBAC）
 ```
 
-测试数据：envtest **14 个 spec** 全绿（`go test` 实测 23–38s），覆盖创建 / 更新 / 删除 / 自愈 /
-幂等零写入 / 冻结（`paused`）/ 失败可见化 / HPA 让位。CI 三个 job 在 `main` 上全绿。
+测试数据：envtest **15 个 spec** 全绿（`go test` 实测 23–44s），覆盖创建 / 更新 / 删除 / 自愈 /
+幂等零写入 / 冻结（`paused`）/ 失败可见化 / HPA 让位 / 双 CR 隔离。CI 三个 job 在 `main` 上全绿。
 
 ## 仓库结构
 
@@ -190,6 +190,7 @@ test/e2e/                             kind 上的 e2e
 
 - `docs/project-one-pager.md` — 一页纸：定位、架构、设计取舍、3 分钟讲稿
 - `docs/day02…day10` — 逐日交付记录
+- `docs/day11-17-mapping.md` — Day 11–17 对账（为什么没有逐日文档、每条证据在哪、三个真缺口）
 - `docs/day18-19-v1-acceptance.md` — 级联回收实测、RBAC 审计、一键演示、已知 409
 
 ## 许可证
