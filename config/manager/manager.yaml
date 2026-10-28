@@ -30,10 +30,10 @@ spec:
         control-plane: controller-manager
         app.kubernetes.io/name: shortlink-operator
     spec:
-      # TODO(user): Uncomment the following code to configure the nodeAffinity expression
-      # according to the platforms which are supported by your solution.
-      # It is considered best practice to support multiple architectures. You can
-      # build your manager image using the makefile target docker-buildx.
+      # TODO(user)：把下面这段取消注释，按你自己的交付物支持的平台
+      # 配置 nodeAffinity 表达式。
+      # 支持多种架构是业界推荐做法。你可以用 makefile 的 docker-buildx
+      # 目标来构建多架构的 manager 镜像。
       # affinity:
       #   nodeAffinity:
       #     requiredDuringSchedulingIgnoredDuringExecution:
@@ -51,9 +51,9 @@ spec:
       #             values:
       #               - linux
       securityContext:
-        # Projects are configured by default to adhere to the "restricted" Pod Security Standards.
-        # This ensures that deployments meet the highest security requirements for Kubernetes.
-        # For more details, see: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+        # 项目默认遵循 "restricted" 这一档 Pod 安全标准，
+        # 这样部署出来的东西就能满足 Kubernetes 最高的安全要求。
+        # 详情见：https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
@@ -87,8 +87,8 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # TODO(user): Configure the resources accordingly based on the project requirements.
-        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        # TODO(user)：按项目实际的资源需求配置 requests/limits。
+        # 详情见：https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
             cpu: 500m

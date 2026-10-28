@@ -1,9 +1,9 @@
-# This rule is not used by the project shortlink-operator itself.
-# It is provided to allow the cluster admin to help manage permissions for users.
+# 本项目（shortlink-operator）自身并不使用这条规则。
+# 它只是提供给集群管理员，方便管理员为用户分配权限。
 #
-# Grants full permissions ('*') over shortlink.dev.
-# This role is intended for users authorized to modify roles and bindings within the cluster,
-# enabling them to delegate specific permissions to other users or groups as needed.
+# 授予 shortlink.dev 下的全部权限（'*'）。
+# 这个角色给的是「有权改集群里的角色与绑定」的那批人，
+# 让他们可以按需把具体权限再委托给其他用户或用户组。
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

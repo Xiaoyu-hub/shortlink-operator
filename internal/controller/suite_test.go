@@ -38,8 +38,8 @@ import (
 	// +kubebuilder:scaffold:imports
 )
 
-// These tests use Ginkgo (BDD-style Go testing framework). Refer to
-// http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
+// 这些测试用 Ginkgo（BDD 风格的 Go 测试框架）。想了解 Ginkgo 用法可看
+// http://onsi.github.io/ginkgo/。
 //
 // 与 Day 5 前的骨架不同：这里真正启动了 manager（控制循环），所以测试是
 // 「创建 CR → Deployment/Service 被 watch 驱动自动调和」，而不是手调 Reconcile。
@@ -78,12 +78,12 @@ var _ = BeforeSuite(func() {
 		ErrorIfCRDPathMissing: true,
 	}
 
-	// Retrieve the first found binary directory to allow running tests from IDEs
+	// 取出找到的第一个二进制目录，这样在 IDE 里直接跑测试也能跑起来
 	if getFirstFoundEnvTestBinaryDir() != "" {
 		testEnv.BinaryAssetsDirectory = getFirstFoundEnvTestBinaryDir()
 	}
 
-	// cfg is defined in this file globally.
+	// cfg 是本文件里的全局变量，后面的用例直接复用。
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
@@ -124,14 +124,13 @@ var _ = AfterSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 })
 
-// getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.
-// ENVTEST-based tests depend on specific binaries, usually located in paths set by
-// controller-runtime. When running tests directly (e.g., via an IDE) without using
-// Makefile targets, the 'BinaryAssetsDirectory' must be explicitly configured.
+// getFirstFoundEnvTestBinaryDir 在给定目录下找出第一个二进制目录。
+// 基于 envtest 的测试依赖一组特定二进制（kube-apiserver、etcd、kubectl），
+// 这些二进制通常放在 controller-runtime 约定的路径下。若不走 Makefile 目标、
+// 而是直接跑测试（例如在 IDE 里点运行），就必须显式配置 BinaryAssetsDirectory。
 //
-// This function streamlines the process by finding the required binaries, similar to
-// setting the 'KUBEBUILDER_ASSETS' environment variable. To ensure the binaries are
-// properly set up, run 'make setup-envtest' beforehand.
+// 这个函数把这件事简化成「自己找个二进制目录」，效果等价于设置
+// KUBEBUILDER_ASSETS 环境变量。要保证二进制真的就位，事先跑一次 'make setup-envtest'。
 func getFirstFoundEnvTestBinaryDir() string {
 	basePath := filepath.Join("..", "..", "bin", "k8s")
 	entries, err := os.ReadDir(basePath)

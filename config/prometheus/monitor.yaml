@@ -1,4 +1,4 @@
-# Prometheus Monitor Service (Metrics)
+# Prometheus 采集用的 ServiceMonitor（metrics）
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -11,15 +11,15 @@ metadata:
 spec:
   endpoints:
     - path: /metrics
-      port: https # Ensure this is the name of the port that exposes HTTPS metrics
+      port: https # 这里必须是暴露 HTTPS metrics 的那个端口名
       scheme: https
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
-        # TODO(user): The option insecureSkipVerify: true is not recommended for production since it disables
-        # certificate verification, exposing the system to potential man-in-the-middle attacks.
-        # For production environments, it is recommended to use cert-manager for automatic TLS certificate management.
-        # To apply this configuration, enable cert-manager and use the patch located at config/prometheus/servicemonitor_tls_patch.yaml,
-        # which securely references the certificate from the 'metrics-server-cert' secret.
+        # TODO(user)：insecureSkipVerify: true 不建议用在生产，因为它关掉了
+        # 证书校验，会把自己暴露在中间人攻击下。
+        # 生产环境推荐用 cert-manager 自动管理 TLS 证书。
+        # 要采用这种方式，先启用 cert-manager，再用 config/prometheus/servicemonitor_tls_patch.yaml
+        # 里的 patch——它会安全地引用 'metrics-server-cert' 这个 secret 里的证书。
         insecureSkipVerify: true
   selector:
     matchLabels:

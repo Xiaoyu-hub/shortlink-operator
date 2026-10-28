@@ -1,4 +1,4 @@
-# This file is for teaching kustomize how to substitute name and namespace reference in CRD
+# 本文件用来教 kustomize 如何替换 CRD 里的名字与命名空间引用
 nameReference:
 - kind: Service
   version: v1

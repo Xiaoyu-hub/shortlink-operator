@@ -33,24 +33,24 @@ import (
 	"github.com/Xiaoyu-hub/shortlink-operator/test/utils"
 )
 
-// namespace where the project is deployed in
+// namespace 是部署项目所用的命名空间
 const namespace = "shortlink-operator-system"
 
-// serviceAccountName created for the project
+// serviceAccountName 是为本项目创建的 ServiceAccount
 const serviceAccountName = "shortlink-operator-controller-manager"
 
-// metricsServiceName is the name of the metrics service of the project
+// metricsServiceName 是本项目 metrics Service 的名字
 const metricsServiceName = "shortlink-operator-controller-manager-metrics-service"
 
-// metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
+// metricsRoleBindingName 是为“能拉指标”而创建的 RBAC 绑定名
 const metricsRoleBindingName = "shortlink-operator-metrics-binding"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
-	// Before running the tests, set up the environment by creating the namespace,
-	// enforce the restricted security policy to the namespace, installing CRDs,
-	// and deploying the controller.
+	// 跑测试前先把环境搭好：建命名空间、
+	// 给它打上 restricted 安全策略、装 CRD，
+	// 最后把控制器部署起来。
 	BeforeAll(func() {
 		By("creating manager namespace")
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
@@ -74,8 +74,8 @@ var _ = Describe("Manager", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 	})
 
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
+	// 所有测试跑完后清理：卸掉控制器、卸载 CRD、
+	// 再把命名空间删掉。
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
@@ -94,8 +94,8 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 	})
 
-	// After each test, check for failures and collect logs, events,
-	// and pod descriptions for debugging.
+	// 每个用例结束后检查是否失败，并收集日志、事件、
+	// Pod describe 输出，方便定位。
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {
@@ -270,9 +270,9 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
+		// TODO：按自己项目的场景给 e2e 套件补用例。
+		// 例如 apply 一个 sample/CR，检查它的 status，或者
+		// 用 metrics 验证调和确实发生了，比如：
 		// metricsOutput, err := getMetricsOutput()
 		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 		// Expect(metricsOutput).To(ContainSubstring(
@@ -282,9 +282,9 @@ var _ = Describe("Manager", Ordered, func() {
 	})
 })
 
-// serviceAccountToken returns a token for the specified service account in the given namespace.
-// It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
-// and parsing the resulting token from the API response.
+// serviceAccountToken 返回指定命名空间里某个 ServiceAccount 的 token。
+// 做法是直接请求 Kubernetes 的 TokenRequest API（不走 kubectl create token 包装），
+// 再从 API 的响应里把 token 那一项解出来。
 func serviceAccountToken() (string, error) {
 	const tokenRequestRawString = `{
 		"apiVersion": "authentication.k8s.io/v1",
@@ -323,15 +323,15 @@ func serviceAccountToken() (string, error) {
 	return out, err
 }
 
-// getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
+// getMetricsOutput 取回 curl Pod 的日志并返回——这个 Pod 就是用来访问 metrics 端点的。
 func getMetricsOutput() (string, error) {
 	By("getting the curl-metrics logs")
 	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
 	return utils.Run(cmd)
 }
 
-// tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,
-// containing only the token field that we need to extract.
+// tokenRequest 是 Kubernetes TokenRequest API 响应的简化表示，
+// 只保留我们真正要取的那个 token 字段。
 type tokenRequest struct {
 	Status struct {
 		Token string `json:"token"`

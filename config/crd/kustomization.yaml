@@ -1,16 +1,16 @@
-# This kustomization.yaml is not intended to be run by itself,
-# since it depends on service name and namespace that are out of this kustomize package.
-# It should be run by config/default
+# 这个 kustomization.yaml 不打算单独跑：
+# 它依赖的 Service 名和命名空间都在本 kustomize 包之外。
+# 应该由 config/default 来驱动它
 resources:
 - bases/shortlink.dev_shortlinks.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.
-# patches here are for enabling the conversion webhook for each CRD
+# [WEBHOOK] 要启用 webhook，就把所有带 [WEBHOOK] 前缀的段落取消注释。
+# 这里的 patch 用于为每个 CRD 启用转换（conversion）webhook
 # +kubebuilder:scaffold:crdkustomizewebhookpatch
 
-# [WEBHOOK] To enable webhook, uncomment the following section
-# the following config is for teaching kustomize how to do kustomization for CRDs.
+# [WEBHOOK] 要启用 webhook，就把下面这一段取消注释
+# 下面这份配置是用来教 kustomize 怎么对 CRD 做 kustomize 处理的。
 #configurations:
 #- kustomizeconfig.yaml

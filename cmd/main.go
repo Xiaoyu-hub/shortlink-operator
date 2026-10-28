@@ -21,8 +21,8 @@ import (
 	"flag"
 	"os"
 
-	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
-	// to ensure that exec-entrypoint and run can make use of them.
+	// 导入全部 Kubernetes 客户端认证插件（Azure、GCP、OIDC 等），
+	// 使 exec-entrypoint 与 run 两条路径都能用到它们。
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -90,10 +90,9 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
+	// enable-http2 为 false（默认值）时要禁用 http/2，因为 http/2 有已知漏洞：
+	// 禁用之后就不会受 HTTP/2 Stream Cancellation 与 Rapid Reset
+	// 这两个 CVE 影响。详情见：
 	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
 	// - https://github.com/advisories/GHSA-4374-p667-p6c8
 	disableHTTP2 := func(c *tls.Config) {
@@ -105,7 +104,7 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Initial webhook TLS options
+	// webhook server 的初始 TLS 选项
 	webhookTLSOpts := tlsOpts
 	webhookServerOptions := webhook.Options{
 		TLSOpts: webhookTLSOpts,
@@ -123,8 +122,8 @@ func main() {
 
 	webhookServer := webhook.NewServer(webhookServerOptions)
 
-	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
+	// metrics 端点在 'config/default/kustomization.yaml' 里启用（那里的 kustomize 决定是否挂这个端口）。
+	// 下面这些 Metrics 选项只管服务端本身怎么跑。详情见：
 	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/metrics/server
 	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
@@ -134,21 +133,20 @@ func main() {
 	}
 
 	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
+		// FilterProvider 用认证（authn）/授权（authz）保护 metrics 端点：
+		// 只有合法的用户与 ServiceAccount 才能拉指标。相应的 RBAC
+		// 在 'config/rbac/kustomization.yaml' 里配置。详情见：
 		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.25.0/pkg/metrics/filters#WithAuthenticationAndAuthorization
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
+	// 不指定证书时，controller-runtime 会为 metrics server 自动生成自签证书。
+	// 开发测试图方便可以这么用，生产环境不建议这样跑。
 	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
+	// TODO(user)：若启用 certManager，取消下面几处的注释：
+	// - config/default/kustomization.yaml 的 [METRICS-WITH-CERTS]，让 metrics server
+	//   使用 cert-manager 签发并托管证书。
+	// - config/prometheus/kustomization.yaml 的 [PROMETHEUS-WITH-CERTS]，给采集侧配 TLS 认证。
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
@@ -165,16 +163,14 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "6c1ecb47.shortlink.dev",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
+		// LeaderElectionReleaseOnCancel 决定 leader 是否在 Manager 结束时主动放弃领导权。
+		// 前提是 Manager 停止后进程要立刻退出，否则这么设是不安全的。
+		// 打开它能显著加快主动交接：新 leader 不必先干等一个
+		// LeaseDuration 的时间。
 		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
+		// 官方脚手架给出的形态是：程序在 manager 停止后立即结束，
+		// 所以把这个开关打开没有问题。但如果你在 manager 停止之后还要做事
+		// （例如做清理），那打开它就可能不安全。
 		//
 		// 本项目开启它，并在真集群做过 A/B 实测（docs/day08）：
 		//   关闭时：删掉 leader Pod → 待命副本只能等租约自然过期（leaseDuration=15s，实测接管 20s）；

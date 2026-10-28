@@ -70,7 +70,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of Shortlink
+            description: spec 定义 Shortlink 的期望状态（用户想要什么）
             properties:
               autoscaling:
                 description: |-
@@ -404,7 +404,7 @@ spec:
             - message: replicas 与 autoscaling 互斥：启用 HPA 后副本数由 HPA 管理，请移除 replicas
               rule: '!(has(self.autoscaling) && has(self.replicas))'
           status:
-            description: status defines the observed state of Shortlink
+            description: status 定义 Shortlink 的观测状态（现在实际是什么样）
             properties:
               conditions:
                 description: |-

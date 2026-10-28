@@ -1,4 +1,4 @@
-## Append samples of your project ##
+## 追加你自己项目的示例 CR ##
 resources:
 - shortlink_v1alpha1_shortlink.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

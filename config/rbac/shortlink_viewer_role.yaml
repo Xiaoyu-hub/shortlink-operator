@@ -1,9 +1,9 @@
-# This rule is not used by the project shortlink-operator itself.
-# It is provided to allow the cluster admin to help manage permissions for users.
+# 本项目（shortlink-operator）自身并不使用这条规则。
+# 它只是提供给集群管理员，方便管理员为用户分配权限。
 #
-# Grants read-only access to shortlink.dev resources.
-# This role is intended for users who need visibility into these resources
-# without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
+# 对 shortlink.dev 资源只读。
+# 这个角色给的是需要看到这些资源、
+# 但没有修改权限的人。适合监控场景和只读查看。
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

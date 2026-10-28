@@ -73,7 +73,7 @@ const (
 	eventActionReconcile = "Reconcile"
 )
 
-// ShortlinkReconciler reconciles a Shortlink object
+// ShortlinkReconciler 负责把一个 Shortlink 对象调和到期望状态
 type ShortlinkReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -168,7 +168,7 @@ func (r *ShortlinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{}, r.updateStatus(ctx, &cr, true)
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// SetupWithManager 把控制器注册到 Manager 上，并声明它监听哪些资源。
 func (r *ShortlinkReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// 事件记录器兜底注入：没显式配就用 manager 的（见字段注释）。
 	if r.Recorder == nil {
@@ -300,7 +300,7 @@ func (r *ShortlinkReconciler) reconcileService(ctx context.Context, cr *shortlin
 	return nil
 }
 
-// ---- HPA ----
+// ---- HPA（自动扩缩容）----
 
 // desiredHPA 从 CR 构造期望的 HPA（纯函数，不读集群）。
 // 只声明我们负责的部分：scaleTargetRef 指向同名 Deployment，CPU 目标利用率来自 spec.autoscaling。

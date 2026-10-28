@@ -230,22 +230,22 @@ type ShortlinkStatus struct {
 type Shortlink struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// metadata 是标准的对象元数据
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of Shortlink
+	// spec 定义 Shortlink 的期望状态（用户想要什么）
 	// +required
 	Spec ShortlinkSpec `json:"spec"`
 
-	// status defines the observed state of Shortlink
+	// status 定义 Shortlink 的观测状态（现在实际是什么样）
 	// +optional
 	Status ShortlinkStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// ShortlinkList contains a list of Shortlink
+// ShortlinkList 是 Shortlink 的列表类型，List 操作的返回体。
 type ShortlinkList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

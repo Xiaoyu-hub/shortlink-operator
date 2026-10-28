@@ -1,14 +1,12 @@
-# Adds namespace to all resources.
+# 给所有资源加上命名空间。
 namespace: shortlink-operator-system
 
-# Value of this field is prepended to the
-# names of all resources, e.g. a deployment named
-# "wordpress" becomes "alices-wordpress".
-# Note that it should also match with the prefix (text before '-') of the namespace
-# field above.
+# 这个字段的值会加在所有资源名字的前面，例如
+# 一个叫 "wordpress" 的 deployment 会变成 "alices-wordpress"。
+# 注意它还应与上面 namespace 字段的前缀（'-' 之前那段文字）保持一致。
 namePrefix: shortlink-operator-
 
-# Labels to add to all resources and selectors.
+# 要加到所有资源与选择器上的标签。
 #labels:
 #- includeSelectors: true
 #  pairs:
@@ -18,45 +16,45 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
-# crd/kustomization.yaml
+# [WEBHOOK] 要启用 webhook，就把所有带 [WEBHOOK] 前缀的段落（包括
+# crd/kustomization.yaml 里那一处）取消注释
 #- ../webhook
-# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER'. 'WEBHOOK' components are required.
+# [CERTMANAGER] 要启用 cert-manager，就把所有带 'CERTMANAGER' 的段落取消注释。前提是 'WEBHOOK' 那些组件已启用。
 #- ../certmanager
-# [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
+# [PROMETHEUS] 要启用 prometheus 采集，就把所有带 'PROMETHEUS' 的段落取消注释。
 #- ../prometheus
-# [METRICS] Expose the controller manager metrics service.
+# [METRICS] 把 controller manager 的 metrics 服务暴露出去。
 - metrics_service.yaml
-# [NETWORK POLICY] Control ingress to metrics and webhook ports.
-# Allow metrics traffic from pods in namespaces labeled 'metrics: enabled'.
-# Allow webhook traffic from all sources.
+# [NETWORK POLICY] 控制进入 metrics 与 webhook 端口的来访流量。
+# 允许打了 'metrics: enabled' 标签的命名空间里的 Pod 拉取指标。
+# 允许任意来源的 webhook 流量。
 #- ../network-policy
 
-# Uncomment the patches line if you enable Metrics
+# 启用 Metrics 后就把下面 patches 这一行的注释取消
 patches:
-# [METRICS] The following patch will enable the metrics endpoint using HTTPS and the port :8443.
-# More info: https://book.kubebuilder.io/reference/metrics
+# [METRICS] 下面这个 patch 会用 HTTPS 暴露 metrics 端点，端口 :8443。
+# 详情见：https://book.kubebuilder.io/reference/metrics
 - path: manager_metrics_patch.yaml
   target:
     kind: Deployment
 
-# Uncomment the patches line if you enable Metrics and CertManager
-# [METRICS-WITH-CERTS] To enable metrics protected with certManager, uncomment the following line.
-# This patch will protect the metrics with certManager self-signed certs.
+# 同时启用 Metrics 与 CertManager 时，就把 patches 这一行的注释取消
+# [METRICS-WITH-CERTS] 要让 certManager 保护 metrics，就取消下面这一行的注释。
+# 这个 patch 会用 certManager 的自签证书保护 metrics。
 #- path: cert_metrics_manager_patch.yaml
 #  target:
 #    kind: Deployment
 
-# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
-# crd/kustomization.yaml
+# [WEBHOOK] 要启用 webhook，就把所有带 [WEBHOOK] 前缀的段落（包括
+# crd/kustomization.yaml 里那一处）取消注释
 #- path: manager_webhook_patch.yaml
 #  target:
 #    kind: Deployment
 
-# [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
-# Uncomment the following replacements to add the cert-manager CA injection annotations
+# [CERTMANAGER] 要启用 cert-manager，就把所有带 'CERTMANAGER' 前缀的段落取消注释。
+# 把下面 replacements 的注释取消，即可注入 cert-manager 的 CA 注解
 #replacements:
-# - source: # Uncomment the following block to enable certificates for metrics
+# - source: # 取消下面这段的注释，即可为 metrics 启用证书
 #     kind: Service
 #     version: v1
 #     name: controller-manager-metrics-service
@@ -74,7 +72,7 @@ patches:
 #         delimiter: '.'
 #         index: 0
 #         create: true
-#     - select: # Uncomment the following to set the Service name for TLS config in Prometheus ServiceMonitor
+#     - select: # 取消注释即可为 Prometheus ServiceMonitor 的 TLS 配置设置 Service 名字
 #         kind: ServiceMonitor
 #         group: monitoring.coreos.com
 #         version: v1
@@ -104,7 +102,7 @@ patches:
 #         delimiter: '.'
 #         index: 1
 #         create: true
-#     - select: # Uncomment the following to set the Service namespace for TLS in Prometheus ServiceMonitor
+#     - select: # 取消注释即可为 Prometheus ServiceMonitor 里的 TLS 配置设置 Service 命名空间
 #         kind: ServiceMonitor
 #         group: monitoring.coreos.com
 #         version: v1
@@ -116,11 +114,11 @@ patches:
 #         index: 1
 #         create: true
 
-# - source: # Uncomment the following block if you have any webhook
+# - source: # 如果你有 webhook，就取消下面这段的注释
 #     kind: Service
 #     version: v1
 #     name: webhook-service
-#     fieldPath: .metadata.name # Name of the service
+#     fieldPath: .metadata.name # Service 的名字
 #   targets:
 #     - select:
 #         kind: Certificate
@@ -138,7 +136,7 @@ patches:
 #     kind: Service
 #     version: v1
 #     name: webhook-service
-#     fieldPath: .metadata.namespace # Namespace of the service
+#     fieldPath: .metadata.namespace # Service 所在的命名空间
 #   targets:
 #     - select:
 #         kind: Certificate
@@ -153,12 +151,12 @@ patches:
 #         index: 1
 #         create: true
 
-# - source: # Uncomment the following block if you have a ValidatingWebhook (--programmatic-validation)
+# - source: # 如果你有 ValidatingWebhook（--programmatic-validation），就取消下面这段的注释
 #     kind: Certificate
 #     group: cert-manager.io
 #     version: v1
-#     name: serving-cert # This name should match the one in certificate.yaml
-#     fieldPath: .metadata.namespace # Namespace of the certificate CR
+#     name: serving-cert # 这个名字要与 certificate.yaml 里的保持一致
+#     fieldPath: .metadata.namespace # 证书 CR 所在的命名空间
 #   targets:
 #     - select:
 #         kind: ValidatingWebhookConfiguration
@@ -184,12 +182,12 @@ patches:
 #         index: 1
 #         create: true
 
-# - source: # Uncomment the following block if you have a DefaultingWebhook (--defaulting )
+# - source: # 如果你有 DefaultingWebhook（--defaulting），就取消下面这段的注释
 #     kind: Certificate
 #     group: cert-manager.io
 #     version: v1
 #     name: serving-cert
-#     fieldPath: .metadata.namespace # Namespace of the certificate CR
+#     fieldPath: .metadata.namespace # 证书 CR 所在的命名空间
 #   targets:
 #     - select:
 #         kind: MutatingWebhookConfiguration
@@ -215,13 +213,13 @@ patches:
 #         index: 1
 #         create: true
 
-# - source: # Uncomment the following block if you have a ConversionWebhook (--conversion)
+# - source: # 如果你有 ConversionWebhook（--conversion），就取消下面这段的注释
 #     kind: Certificate
 #     group: cert-manager.io
 #     version: v1
 #     name: serving-cert
-#     fieldPath: .metadata.namespace # Namespace of the certificate CR
-#   targets: # Do not remove or uncomment the following scaffold marker; required to generate code for target CRD.
+#     fieldPath: .metadata.namespace # 证书 CR 所在的命名空间
+#   targets: # 下面这个脚手架标记不要删、也不要取消注释；生成目标 CRD 的代码需要它。
 # +kubebuilder:scaffold:crdkustomizecainjectionns
 # - source:
 #     kind: Certificate
@@ -229,5 +227,5 @@ patches:
 #     version: v1
 #     name: serving-cert
 #     fieldPath: .metadata.name
-#   targets: # Do not remove or uncomment the following scaffold marker; required to generate code for target CRD.
+#   targets: # 下面这个脚手架标记不要删、也不要取消注释；生成目标 CRD 的代码需要它。
 # +kubebuilder:scaffold:crdkustomizecainjectionname

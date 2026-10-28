@@ -1,6 +1,6 @@
-# This patch adds the args, volumes, and ports to allow the manager to use the metrics-server certs.
+# 这个 patch 给 manager 补上参数、卷和端口，让它能用 metrics-server 的证书。
 
-# Add the volumeMount for the metrics-server certs
+# 给 metrics-server 证书加上 volumeMount
 - op: add
   path: /spec/template/spec/containers/0/volumeMounts/-
   value:
@@ -8,12 +8,12 @@
     name: metrics-certs
     readOnly: true
 
-# Add the --metrics-cert-path argument for the metrics server
+# 给 metrics server 加上 --metrics-cert-path 参数
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: --metrics-cert-path=/tmp/k8s-metrics-server/metrics-certs
 
-# Add the metrics-server certs volume configuration
+# 加上 metrics-server 证书的卷配置
 - op: add
   path: /spec/template/spec/volumes/-
   value:

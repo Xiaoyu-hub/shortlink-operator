@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package v1alpha1 contains API Schema definitions for the shortlink v1alpha1 API group.
+// Package v1alpha1 定义 shortlink v1alpha1 这一 API 组的 API 模式（Schema）。
 // +kubebuilder:object:generate=true
 // +groupName=shortlink.dev
 package v1alpha1
@@ -26,19 +26,19 @@ import (
 )
 
 var (
-	// SchemeGroupVersion is group version used to register these objects.
-	// This name is used by applyconfiguration generators (e.g. controller-gen).
+	// SchemeGroupVersion 是注册这些对象时使用的组版本。
+	// applyconfiguration 生成器（例如 controller-gen）会引用这个名字。
 	SchemeGroupVersion = schema.GroupVersion{Group: "shortlink.dev", Version: "v1alpha1"}
 
-	// GroupVersion is an alias for SchemeGroupVersion, for backward compatibility.
+	// GroupVersion 是 SchemeGroupVersion 的别名，保留只是为了向后兼容。
 	GroupVersion = SchemeGroupVersion
 
-	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
+	// SchemeBuilder 负责把本包的 Go 类型登记进 GroupVersionKind 对应的 scheme。
 	SchemeBuilder = runtime.NewSchemeBuilder(func(scheme *runtime.Scheme) error {
 		metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 		return nil
 	})
 
-	// AddToScheme adds the types in this group-version to the given scheme.
+	// AddToScheme 把本组版本的类型加入调用方给出的 scheme。
 	AddToScheme = SchemeBuilder.AddToScheme
 )

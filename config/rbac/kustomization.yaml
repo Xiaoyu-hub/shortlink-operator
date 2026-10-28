@@ -1,27 +1,25 @@
 resources:
-# All RBAC will be applied under this service account in
-# the deployment namespace. You may comment out this resource
-# if your manager will use a service account that exists at
-# runtime. Be sure to update RoleBinding and ClusterRoleBinding
-# subjects if changing service account names.
+# 所有 RBAC 都会在部署命名空间下、以这个 ServiceAccount 的身份生效。
+# 如果你的 manager 要用一个已在运行时存在的 ServiceAccount，
+# 可以把这条资源注释掉。若改了 ServiceAccount 名字，
+# 记得同步修改 RoleBinding 与 ClusterRoleBinding 的 subjects。
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
-# The following RBAC configurations are used to protect
-# the metrics endpoint with authn/authz. These configurations
-# ensure that only authorized users and service accounts
-# can access the metrics endpoint. Comment the following
-# permissions if you want to disable this protection.
-# More info: https://book.kubebuilder.io/reference/metrics.html
+# 下面这些 RBAC 用来把 metrics 端点放在认证/授权之后：
+# 保证只有合法的用户与 ServiceAccount
+# 能访问 metrics 端点。不想保留这层保护
+# 就把下面这些权限注释掉。
+# 详情见：https://book.kubebuilder.io/reference/metrics.html
 - metrics_auth_role.yaml
 - metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
-# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
-# default, aiding admins in cluster management. Those roles are
-# not used by the shortlink-operator itself. You can comment the following lines
-# if you do not want those helpers be installed with your Project.
+# 每个 CRD 都会默认脚手架出 "Admin"、"Editor"、"Viewer" 三个角色，
+# 方便集群管理员做权限托管。这三个角色
+# 本项目（shortlink-operator）自己并不用。如果你不想让这些
+# 辅助角色随项目一起安装，可以把下面几行注释掉。
 - shortlink_admin_role.yaml
 - shortlink_editor_role.yaml
 - shortlink_viewer_role.yaml

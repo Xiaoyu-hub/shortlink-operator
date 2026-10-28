@@ -1,11 +1,10 @@
-# This file configures golangci-lint with module plugins.
-# When you run 'make lint', it will automatically build a custom golangci-lint binary
-# with all the plugins listed below.
+# 本文件用模块插件的方式配置 golangci-lint。
+# 执行 'make lint' 时，它会自动构建一个带下列所有插件的自定义 golangci-lint 二进制。
 #
-# See: https://golangci-lint.run/plugins/module-plugins/
+# 参见：https://golangci-lint.run/plugins/module-plugins/
 version: v2.13.1
 plugins:
-  # logcheck validates structured logging calls and parameters (e.g., balanced key-value pairs)
+  # logcheck 被检结构化日志调用及其参数（例如 key-value 是否成对）
   - module: "sigs.k8s.io/logtools"
     import: "sigs.k8s.io/logtools/logcheck/gclplugin"
     version: latest
